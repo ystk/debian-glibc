@@ -1,0 +1,3768 @@
+Backport test infrastructure from 2.24.
+
+--- /dev/null
++++ glibc-2.19/support/check.c
+@@ -0,0 +1,57 @@
++/* Support code for reporting test results.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/check.h>
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/test-driver.h>
++
++static void
++print_failure (const char *file, int line, const char *format, va_list ap)
++{
++  printf ("error: %s:%d: ", file, line);
++  vprintf (format, ap);
++  puts ("");
++}
++
++int
++support_print_failure_impl (const char *file, int line,
++                            const char *format, ...)
++{
++  support_record_failure ();
++  va_list ap;
++  va_start (ap, format);
++  print_failure (file, line, format, ap);
++  va_end (ap);
++  return 1;
++}
++
++void
++support_exit_failure_impl (int status, const char *file, int line,
++                           const char *format, ...)
++{
++  if (status != EXIT_SUCCESS && status != EXIT_UNSUPPORTED)
++    support_record_failure ();
++  va_list ap;
++  va_start (ap, format);
++  print_failure (file, line, format, ap);
++  va_end (ap);
++  exit (status);
++}
+--- /dev/null
++++ glibc-2.19/support/check.h
+@@ -0,0 +1,94 @@
++/* Functionality for reporting test results.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_CHECK_H
++#define SUPPORT_CHECK_H
++
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++/* Record a test failure, print the failure message to standard output
++   and return 1.  */
++#define FAIL_RET(...) \
++  return support_print_failure_impl (__FILE__, __LINE__, __VA_ARGS__)
++
++/* Print the failure message and terminate the process with STATUS.
++   Record a the process as failed if STATUS is neither EXIT_SUCCESS
++   nor EXIT_UNSUPPORTED.  */
++#define FAIL_EXIT(status, ...) \
++  support_exit_failure_impl (status, __FILE__, __LINE__, __VA_ARGS__)
++
++/* Record a test failure, print the failure message and terminate with
++   exit status 1.  */
++#define FAIL_EXIT1(...) \
++  support_exit_failure_impl (1, __FILE__, __LINE__, __VA_ARGS__)
++
++/* Print failure message and terminate with as unsupported test (exit
++   status of 77).  */
++#define FAIL_UNSUPPORTED(...) \
++  support_exit_failure_impl (77, __FILE__, __LINE__, __VA_ARGS__)
++
++/* Record a test failure (but continue executing) if EXPR evaluates to
++   false.  */
++#define TEST_VERIFY(expr)                                       \
++  ({                                                            \
++    if (expr)                                                   \
++      ;                                                         \
++    else                                                        \
++      support_test_verify_impl (-1, __FILE__, __LINE__, #expr); \
++  })
++
++/* Record a test failure and exit if EXPR evaluates to false.  */
++#define TEST_VERIFY_EXIT(expr)                                  \
++  ({                                                            \
++    if (expr)                                                   \
++      ;                                                         \
++    else                                                        \
++      support_test_verify_impl (1, __FILE__, __LINE__, #expr);  \
++  })
++
++int support_print_failure_impl (const char *file, int line,
++                                const char *format, ...)
++  __attribute__ ((nonnull (1), format (printf, 3, 4)));
++void support_exit_failure_impl (int exit_status,
++                                const char *file, int line,
++                                const char *format, ...)
++  __attribute__ ((noreturn, nonnull (2), format (printf, 4, 5)));
++void support_test_verify_impl (int status, const char *file, int line,
++                               const char *expr);
++
++/* Record a test failure.  This function returns and does not
++   terminate the process.  The failure counter is stored in a shared
++   memory mapping, so that failures reported in child processes are
++   visible to the parent process and test driver.  This function
++   depends on initialization by an ELF constructor, so it can only be
++   invoked after the test driver has run.  Note that this function
++   does not support reporting failures from a DSO.  */
++void support_record_failure (void);
++
++/* Internal function called by the test driver.  */
++int support_report_failure (int status)
++  __attribute__ ((weak, warn_unused_result));
++
++/* Internal function used to test the failure recording framework.  */
++void support_record_failure_reset (void);
++
++__END_DECLS
++
++#endif /* SUPPORT_CHECK_H */
+--- /dev/null
++++ glibc-2.19/support/test-driver.c
+@@ -0,0 +1,156 @@
++/* Main function for test programs.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* This file should be included from test cases.  It will define a
++   main function which provides the test wrapper.
++
++   It assumes that the test case defines a function
++
++     int do_test (void);
++
++   and arranges for that function being called under the test wrapper.
++   The do_test function should return 0 to indicate a passing test, 1
++   to indicate a failing test, or 77 to indicate an unsupported test.
++   Other result values could be used to indicate a failing test, but
++   the result of the expression is passed to exit and exit only
++   returns the lower 8 bits of its input.  A non-zero return with some
++   values could cause a test to incorrectly be considered passing when
++   it really failed.  For this reason, the function should always
++   return 0 (EXIT_SUCCESS), 1 (EXIT_FAILURE), or 77
++   (EXIT_UNSUPPORTED).
++
++   The test function may print out diagnostic or warning messages as well
++   as messages about failures.  These messages should be printed to stdout
++   and not stderr so that the output is properly ordered with respect to
++   the rest of the glibc testsuite run output.
++
++   Several preprocessors macros can be defined before including this
++   file.
++
++   The name of the do_test function can be changed with the
++   TEST_FUNCTION macro.  It must expand to the desired function name.
++
++   If the test case needs access to command line parameters, it must
++   define the TEST_FUNCTION_ARGV macro with the name of the test
++   function.  It must have the following type:
++
++     int TEST_FUNCTION_ARGV (int argc, char **argv);
++
++   This overrides the do_test default function and is incompatible
++   with the TEST_FUNCTION macro.
++
++   If PREPARE is defined, it must expand to the name of a function of
++   the type
++
++     void PREPARE (int argc, char **);
++
++   This function will be called early, after parsing the command line,
++   but before running the test, in the parent process which acts as
++   the test supervisor.
++
++   If CLEANUP_HANDLER is defined, it must expand to the name of a
++   function of the type
++
++     void CLEANUP_HANDLER (void);
++
++   This function will be called from the timeout (SIGALRM) signal
++   handler.
++
++   If EXPECTED_SIGNAL is defined, it must expanded to a constant which
++   denotes the expected signal number.
++
++   If EXPECTED_STATUS is defined, it must expand to the expected exit
++   status.
++
++   If TIMEOUT is defined, it must be positive constant.  It overrides
++   the default test timeout and is measured in seconds.
++
++   If TEST_NO_MALLOPT is defined, the test wrapper will not call
++   mallopt.
++
++   Custom command line handling can be implemented by defining the
++   CMDLINE_OPTION macro (after including the <getopt.h> header; this
++   requires _GNU_SOURCE to be defined).  This macro must expand to a
++   to a comma-separated list of braced initializers for struct option
++   from <getopt.h>, with a trailing comma.  CMDLINE_PROCESS can be
++   defined as the name of a function which is called to process these
++   options.  The function is passed the option character/number and
++   has this type:
++
++     void CMDLINE_PROCESS (int);
++*/
++
++#include <support/test-driver.h>
++
++#include <string.h>
++
++int
++main (int argc, char **argv)
++{
++  struct test_config test_config;
++  memset (&test_config, 0, sizeof (test_config));
++
++#ifdef PREPARE
++  test_config.prepare_function = (PREPARE);
++#endif
++
++#if defined (TEST_FUNCTION) && defined (TEST_FUNCTON_ARGV)
++# error TEST_FUNCTION and TEST_FUNCTION_ARGV cannot be defined at the same time
++#endif
++#if defined (TEST_FUNCTION)
++  test_config.test_function = TEST_FUNCTION;
++#elif defined (TEST_FUNCTION_ARGV)
++  test_config.test_function_argv = TEST_FUNCTION_ARGV;
++#else
++  test_config.test_function = do_test;
++#endif
++
++#ifdef CLEANUP_HANDLER
++  test_config.cleanup_function = CLEANUP_HANDLER;
++#endif
++
++#ifdef EXPECTED_SIGNAL
++  test_config.expected_signal = (EXPECTED_SIGNAL);
++#endif
++
++#ifdef EXPECTED_STATUS
++  test_config.expected_status = (EXPECTED_STATUS);
++#endif
++
++#ifdef TEST_NO_MALLOPT
++  test_config.no_mallopt = 1;
++#endif
++
++#ifdef TIMEOUT
++  test_config.timeout = TIMEOUT;
++#endif
++
++#ifdef CMDLINE_OPTIONS
++  struct option options[] =
++    {
++      CMDLINE_OPTIONS
++      TEST_DEFAULT_OPTIONS
++    };
++  test_config.options = &options;
++#endif
++#ifdef CMDLINE_PROCESS
++  test_config.cmdline_function = CMDLINE_PROCESS;
++#endif
++
++  return support_test_main (argc, argv, &test_config);
++}
+--- /dev/null
++++ glibc-2.19/support/test-driver.h
+@@ -0,0 +1,74 @@
++/* Interfaces for the test driver.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_TEST_DRIVER_H
++#define SUPPORT_TEST_DRIVER_H
++
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++struct test_config
++{
++  void (*prepare_function) (int argc, char **argv);
++  int (*test_function) (void);
++  int (*test_function_argv) (int argc, char **argv);
++  void (*cleanup_function) (void);
++  void (*cmdline_function) (int);
++  const void *options;   /* Custom options if not NULL.  */
++  int timeout;           /* Test timeout in seconds.  */
++  int expected_status;   /* Expected exit status.  */
++  int expected_signal;   /* If non-zero, expect termination by signal.  */
++  char no_mallopt;       /* Boolean flag to disable mallopt.  */
++};
++
++enum
++  {
++    /* Test exit status which indicates that the feature is
++       unsupported. */
++    EXIT_UNSUPPORTED = 77,
++
++    /* Default timeout is twenty seconds.  Tests should normally
++       complete faster than this, but if they don't, that's abnormal
++       (a bug) anyways.  */
++    DEFAULT_TIMEOUT = 20,
++
++    /* Used for command line argument parsing.  */
++    OPT_DIRECT = 1000,
++    OPT_TESTDIR,
++  };
++
++/* Options provided by the test driver.  */
++#define TEST_DEFAULT_OPTIONS                            \
++  { "verbose", no_argument, NULL, 'v' },                \
++  { "direct", no_argument, NULL, OPT_DIRECT },          \
++  { "test-dir", required_argument, NULL, OPT_TESTDIR }, \
++
++/* The directory the test should use for temporary files.  */
++extern const char *test_dir;
++
++/* The number of --verbose arguments specified during program
++   invocation.  This variable can be used to control the verbosity of
++   tests.  */
++extern unsigned int test_verbose;
++
++int support_test_main (int argc, char **argv, const struct test_config *);
++
++__END_DECLS
++
++#endif /* SUPPORT_TEST_DRIVER_H */
+--- /dev/null
++++ glibc-2.19/support/support_test_main.c
+@@ -0,0 +1,423 @@
++/* Main worker function for the test driver.
++   Copyright (C) 1998-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/test-driver.h>
++#include <support/check.h>
++#include <support/temp_file-internal.h>
++
++#include <assert.h>
++#include <errno.h>
++#include <getopt.h>
++#include <malloc.h>
++#include <signal.h>
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/param.h>
++#include <sys/resource.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <time.h>
++#include <unistd.h>
++
++static const struct option default_options[] =
++{
++  TEST_DEFAULT_OPTIONS
++  { NULL, 0, NULL, 0 }
++};
++
++/* Show people how to run the program.  */
++static void
++usage (const struct option *options)
++{
++  size_t i;
++
++  printf ("Usage: %s [options]\n"
++          "\n"
++          "Environment Variables:\n"
++          "  TIMEOUTFACTOR          An integer used to scale the timeout\n"
++          "  TMPDIR                 Where to place temporary files\n"
++          "  TEST_COREDUMPS         Do not disable coredumps if set\n"
++          "\n",
++          program_invocation_short_name);
++  printf ("Options:\n");
++  for (i = 0; options[i].name; ++i)
++    {
++      int indent;
++
++      indent = printf ("  --%s", options[i].name);
++      if (options[i].has_arg == required_argument)
++        indent += printf (" <arg>");
++      printf ("%*s", 25 - indent, "");
++      switch (options[i].val)
++        {
++        case 'v':
++          printf ("Increase the output verbosity");
++          break;
++        case OPT_DIRECT:
++          printf ("Run the test directly (instead of forking & monitoring)");
++          break;
++        case OPT_TESTDIR:
++          printf ("Override the TMPDIR env var");
++          break;
++        }
++      printf ("\n");
++    }
++}
++
++/* The PID of the test process.  */
++static pid_t test_pid;
++
++/* The cleanup handler passed to test_main.  */
++static void (*cleanup_function) (void);
++
++/* Timeout handler.  We kill the child and exit with an error.  */
++static void
++__attribute__ ((noreturn))
++signal_handler (int sig)
++{
++  int killed;
++  int status;
++
++  assert (test_pid > 1);
++  /* Kill the whole process group.  */
++  kill (-test_pid, SIGKILL);
++  /* In case setpgid failed in the child, kill it individually too.  */
++  kill (test_pid, SIGKILL);
++
++  /* Wait for it to terminate.  */
++  int i;
++  for (i = 0; i < 5; ++i)
++    {
++      killed = waitpid (test_pid, &status, WNOHANG|WUNTRACED);
++      if (killed != 0)
++        break;
++
++      /* Delay, give the system time to process the kill.  If the
++         nanosleep() call return prematurely, all the better.  We
++         won't restart it since this probably means the child process
++         finally died.  */
++      struct timespec ts;
++      ts.tv_sec = 0;
++      ts.tv_nsec = 100000000;
++      nanosleep (&ts, NULL);
++    }
++  if (killed != 0 && killed != test_pid)
++    {
++      printf ("Failed to kill test process: %m\n");
++      exit (1);
++    }
++
++  if (cleanup_function != NULL)
++    cleanup_function ();
++
++  if (sig == SIGINT)
++    {
++      signal (sig, SIG_DFL);
++      raise (sig);
++    }
++
++  if (killed == 0 || (WIFSIGNALED (status) && WTERMSIG (status) == SIGKILL))
++    puts ("Timed out: killed the child process");
++  else if (WIFSTOPPED (status))
++    printf ("Timed out: the child process was %s\n",
++            strsignal (WSTOPSIG (status)));
++  else if (WIFSIGNALED (status))
++    printf ("Timed out: the child process got signal %s\n",
++            strsignal (WTERMSIG (status)));
++  else
++    printf ("Timed out: killed the child process but it exited %d\n",
++            WEXITSTATUS (status));
++
++  /* Exit with an error.  */
++  exit (1);
++}
++
++/* Run test_function or test_function_argv.  */
++static int
++run_test_function (int argc, char **argv, const struct test_config *config)
++{
++  if (config->test_function != NULL)
++    return config->test_function ();
++  else if (config->test_function_argv != NULL)
++    return config->test_function_argv (argc, argv);
++  else
++    {
++      printf ("error: no test function defined\n");
++      exit (1);
++    }
++}
++
++static bool test_main_called;
++
++const char *test_dir = NULL;
++unsigned int test_verbose = 0;
++
++/* If test failure reporting has been linked in, it may contribute
++   additional test failures.  */
++static int
++adjust_exit_status (int status)
++{
++  if (support_report_failure != NULL)
++    return support_report_failure (status);
++  return status;
++}
++
++int
++support_test_main (int argc, char **argv, const struct test_config *config)
++{
++  if (test_main_called)
++    {
++      printf ("error: test_main called for a second time\n");
++      exit (1);
++    }
++  test_main_called = true;
++  const struct option *options;
++  if (config->options != NULL)
++    options = config->options;
++  else
++    options = default_options;
++
++  cleanup_function = config->cleanup_function;
++
++  int direct = 0;       /* Directly call the test function?  */
++  int status;
++  int opt;
++  unsigned int timeoutfactor = 1;
++  pid_t termpid;
++
++  if (!config->no_mallopt)
++    {
++      /* Make uses of freed and uninitialized memory known.  Do not
++         pull in a definition for mallopt if it has not been defined
++         already.  */
++      extern __typeof__ (mallopt) mallopt __attribute__ ((weak));
++      if (mallopt != NULL)
++        mallopt (M_PERTURB, 42);
++    }
++
++  while ((opt = getopt_long (argc, argv, "+", options, NULL)) != -1)
++    switch (opt)
++      {
++      case '?':
++        usage (options);
++        exit (1);
++      case 'v':
++        ++test_verbose;
++        break;
++      case OPT_DIRECT:
++        direct = 1;
++        break;
++      case OPT_TESTDIR:
++        test_dir = optarg;
++        break;
++      default:
++        if (config->cmdline_function != NULL)
++          config->cmdline_function (opt);
++      }
++
++  /* If set, read the test TIMEOUTFACTOR value from the environment.
++     This value is used to scale the default test timeout values. */
++  char *envstr_timeoutfactor = getenv ("TIMEOUTFACTOR");
++  if (envstr_timeoutfactor != NULL)
++    {
++      char *envstr_conv = envstr_timeoutfactor;
++      unsigned long int env_fact;
++
++      env_fact = strtoul (envstr_timeoutfactor, &envstr_conv, 0);
++      if (*envstr_conv == '\0' && envstr_conv != envstr_timeoutfactor)
++        timeoutfactor = MAX (env_fact, 1);
++    }
++
++  /* Set TMPDIR to specified test directory.  */
++  if (test_dir != NULL)
++    {
++      setenv ("TMPDIR", test_dir, 1);
++
++      if (chdir (test_dir) < 0)
++        {
++          printf ("chdir: %m\n");
++          exit (1);
++        }
++    }
++  else
++    {
++      test_dir = getenv ("TMPDIR");
++      if (test_dir == NULL || test_dir[0] == '\0')
++        test_dir = "/tmp";
++    }
++  if (support_set_test_dir != NULL)
++    support_set_test_dir (test_dir);
++
++  int timeout = config->timeout;
++  if (timeout == 0)
++    timeout =  DEFAULT_TIMEOUT;
++
++  /* Make sure we see all message, even those on stdout.  */
++  setvbuf (stdout, NULL, _IONBF, 0);
++
++  /* Make sure temporary files are deleted.  */
++  if (support_delete_temp_files != NULL)
++      atexit (support_delete_temp_files);
++
++  /* Correct for the possible parameters.  */
++  argv[optind - 1] = argv[0];
++  argv += optind - 1;
++  argc -= optind - 1;
++
++  /* Call the initializing function, if one is available.  */
++  if (config->prepare_function != NULL)
++    config->prepare_function (argc, argv);
++
++  const char *envstr_direct = getenv ("TEST_DIRECT");
++  if (envstr_direct != NULL)
++    {
++      FILE *f = fopen (envstr_direct, "w");
++      if (f == NULL)
++        {
++          printf ("cannot open TEST_DIRECT output file '%s': %m\n",
++                  envstr_direct);
++          exit (1);
++        }
++
++      fprintf (f, "timeout=%u\ntimeoutfactor=%u\n",
++               config->timeout, timeoutfactor);
++      if (config->expected_status != 0)
++        fprintf (f, "exit=%u\n", config->expected_status);
++      if (config->expected_signal != 0)
++        fprintf (f, "signal=%s\n", strsignal (config->expected_signal));
++
++      if (support_print_temp_files != NULL)
++        support_print_temp_files (f);
++
++      fclose (f);
++      direct = 1;
++    }
++
++  bool disable_coredumps;
++  {
++    const char *coredumps = getenv ("TEST_COREDUMPS");
++    disable_coredumps = coredumps == NULL || coredumps[0] == '\0';
++  }
++
++  /* If we are not expected to fork run the function immediately.  */
++  if (direct)
++    return adjust_exit_status (run_test_function (argc, argv, config));
++
++  /* Set up the test environment:
++     - prevent core dumps
++     - set up the timer
++     - fork and execute the function.  */
++
++  test_pid = fork ();
++  if (test_pid == 0)
++    {
++      /* This is the child.  */
++      if (disable_coredumps)
++        {
++          /* Try to avoid dumping core.  This is necessary because we
++             run the test from the source tree, and the coredumps
++             would end up there (and not in the build tree).  */
++          struct rlimit core_limit;
++          core_limit.rlim_cur = 0;
++          core_limit.rlim_max = 0;
++          setrlimit (RLIMIT_CORE, &core_limit);
++        }
++
++      /* We put the test process in its own pgrp so that if it bogusly
++         generates any job control signals, they won't hit the whole build.  */
++      if (setpgid (0, 0) != 0)
++        printf ("Failed to set the process group ID: %m\n");
++
++      /* Execute the test function and exit with the return value.   */
++      exit (run_test_function (argc, argv, config));
++    }
++  else if (test_pid < 0)
++    {
++      printf ("Cannot fork test program: %m\n");
++      exit (1);
++    }
++
++  /* Set timeout.  */
++  signal (SIGALRM, signal_handler);
++  alarm (timeout * timeoutfactor);
++
++  /* Make sure we clean up if the wrapper gets interrupted.  */
++  signal (SIGINT, signal_handler);
++
++  /* Wait for the regular termination.  */
++  termpid = TEMP_FAILURE_RETRY (waitpid (test_pid, &status, 0));
++  if (termpid == -1)
++    {
++      printf ("Waiting for test program failed: %m\n");
++      exit (1);
++    }
++  if (termpid != test_pid)
++    {
++      printf ("Oops, wrong test program terminated: expected %ld, got %ld\n",
++              (long int) test_pid, (long int) termpid);
++      exit (1);
++    }
++
++  /* Process terminated normaly without timeout etc.  */
++  if (WIFEXITED (status))
++    {
++      if (config->expected_status == 0)
++        {
++          if (config->expected_signal == 0)
++            /* Exit with the return value of the test.  */
++            return adjust_exit_status (WEXITSTATUS (status));
++          else
++            {
++              printf ("Expected signal '%s' from child, got none\n",
++                      strsignal (config->expected_signal));
++              exit (1);
++            }
++        }
++      else
++        {
++          /* Non-zero exit status is expected */
++          if (WEXITSTATUS (status) != config->expected_status)
++            {
++              printf ("Expected status %d, got %d\n",
++                      config->expected_status, WEXITSTATUS (status));
++              exit (1);
++            }
++        }
++      return adjust_exit_status (0);
++    }
++  /* Process was killed by timer or other signal.  */
++  else
++    {
++      if (config->expected_signal == 0)
++        {
++          printf ("Didn't expect signal from child: got `%s'\n",
++                  strsignal (WTERMSIG (status)));
++          exit (1);
++        }
++      else if (WTERMSIG (status) != config->expected_signal)
++        {
++          printf ("Incorrect signal from child: got `%s', need `%s'\n",
++                  strsignal (WTERMSIG (status)),
++                  strsignal (config->expected_signal));
++          exit (1);
++        }
++
++      return adjust_exit_status (0);
++    }
++}
+--- /dev/null
++++ glibc-2.19/support/support_test_verify_impl.c
+@@ -0,0 +1,33 @@
++/* Implementation of the TEST_VERIFY and TEST_VERIFY_EXIT macros.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/check.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++
++void
++support_test_verify_impl (int status, const char *file, int line,
++                          const char *expr)
++{
++  support_record_failure ();
++  printf ("error: %s:%d: not true: %s\n", file, line, expr);
++  if (status >= 0)
++    exit (status);
++
++}
+--- /dev/null
++++ glibc-2.19/support/temp_file-internal.h
+@@ -0,0 +1,31 @@
++/* Internal weak declarations for temporary file handling.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_TEMP_FILE_INTERNAL_H
++#define SUPPORT_TEMP_FILE_INTERNAL_H
++
++/* These functions are called by the test driver if they are
++   defined.  Tests should not call them directly.  */
++
++#include <stdio.h>
++
++void support_set_test_dir (const char *name) __attribute__ ((weak));
++void support_delete_temp_files (void) __attribute__ ((weak));
++void support_print_temp_files (FILE *) __attribute__ ((weak));
++
++#endif /* SUPPORT_TEMP_FILE_INTERNAL_H */
+--- /dev/null
++++ glibc-2.19/support/temp_file.c
+@@ -0,0 +1,132 @@
++/* Temporary file handling for tests.
++   Copyright (C) 1998-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* This is required to get an mkstemp which can create large files on
++   some 32-bit platforms. */
++#define _FILE_OFFSET_BITS 64
++
++#include <support/temp_file.h>
++#include <support/temp_file-internal.h>
++#include <support/support.h>
++
++#include <paths.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++/* List of temporary files.  */
++static struct temp_name_list
++{
++  struct temp_name_list *next;
++  char *name;
++  pid_t owner;
++} *temp_name_list;
++
++/* Location of the temporary files.  Set by the test skeleton via
++   support_set_test_dir.  The string is not be freed.  */
++static const char *test_temp_dir = _PATH_TMP;
++
++void
++add_temp_file (const char *name)
++{
++  struct temp_name_list *newp
++    = (struct temp_name_list *) xcalloc (sizeof (*newp), 1);
++  char *newname = strdup (name);
++  if (newname != NULL)
++    {
++      newp->name = newname;
++      newp->next = temp_name_list;
++      newp->owner = getpid ();
++      temp_name_list = newp;
++    }
++  else
++    free (newp);
++}
++
++int
++create_temp_file (const char *base, char **filename)
++{
++  char *fname;
++  int fd;
++
++  fname = (char *) xmalloc (strlen (test_temp_dir) + 1 + strlen (base)
++			    + sizeof ("XXXXXX"));
++  strcpy (stpcpy (stpcpy (stpcpy (fname, test_temp_dir), "/"), base), "XXXXXX");
++
++  fd = mkstemp (fname);
++  if (fd == -1)
++    {
++      printf ("cannot open temporary file '%s': %m\n", fname);
++      free (fname);
++      return -1;
++    }
++
++  add_temp_file (fname);
++  if (filename != NULL)
++    *filename = fname;
++  else
++    free (fname);
++
++  return fd;
++}
++
++/* Helper functions called by the test skeleton follow.  */
++
++void
++support_set_test_dir (const char *path)
++{
++  test_temp_dir = path;
++}
++
++void
++support_delete_temp_files (void)
++{
++  pid_t pid = getpid ();
++  while (temp_name_list != NULL)
++    {
++      /* Only perform the removal if the path was registed in the same
++	 process, as identified by the PID.  (This assumes that the
++	 parent process which registered the temporary file sticks
++	 around, to prevent PID reuse.)  */
++      if (temp_name_list->owner == pid)
++	{
++	  if (remove (temp_name_list->name) != 0)
++	    printf ("warning: could not remove temporary file: %s: %m\n",
++		    temp_name_list->name);
++	}
++      free (temp_name_list->name);
++
++      struct temp_name_list *next = temp_name_list->next;
++      free (temp_name_list);
++      temp_name_list = next;
++    }
++}
++
++void
++support_print_temp_files (FILE *f)
++{
++  if (temp_name_list != NULL)
++    {
++      struct temp_name_list *n;
++      fprintf (f, "temp_files=(\n");
++      for (n = temp_name_list; n != NULL; n = n->next)
++        fprintf (f, "  '%s'\n", n->name);
++      fprintf (f, ")\n");
++    }
++}
+--- /dev/null
++++ glibc-2.19/support/temp_file.h
+@@ -0,0 +1,37 @@
++/* Declarations for temporary file handling.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_TEMP_FILE_H
++#define SUPPORT_TEMP_FILE_H
++
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++/* Schedule a temporary file for deletion on exit.  */
++void add_temp_file (const char *name);
++
++/* Create a temporary file.  Return the opened file descriptor on
++   success, or -1 on failure.  Write the file name to *FILENAME if
++   FILENAME is not NULL.  In this case, the caller is expected to free
++   *FILENAME.  */
++int create_temp_file (const char *base, char **filename);
++
++__END_DECLS
++
++#endif /* SUPPORT_TEMP_FILE_H */
+--- /dev/null
++++ glibc-2.19/support/support.h
+@@ -0,0 +1,74 @@
++/* Common extra functions.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* This header file should only contain definitions compatible with
++   C90.  (Using __attribute__ is fine because <features.h> provides a
++   fallback.)  */
++
++#ifndef SUPPORT_H
++#define SUPPORT_H
++
++#include <stddef.h>
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++/* Write a message to standard output.  Can be used in signal
++   handlers.  */
++void write_message (const char *message) __attribute__ ((nonnull (1)));
++
++/* Avoid all the buffer overflow messages on stderr.  */
++void ignore_stderr (void);
++
++/* Set fortification error handler.  Used when tests want to verify that bad
++   code is caught by the library.  */
++void set_fortify_handler (void (*handler) (int sig));
++
++/* Report an out-of-memory error for the allocation of SIZE bytes in
++   FUNCTION, terminating the process.  */
++void oom_error (const char *function, size_t size)
++  __attribute__ ((nonnull (1)));
++
++/* Return a pointer to a memory region of SIZE bytes.  The memory is
++   initialized to zero and will be shared with subprocesses (across
++   fork).  The returned pointer must be freed using
++   support_shared_free; it is not compatible with the malloc
++   functions.  */
++void *support_shared_allocate (size_t size);
++
++/* Deallocate a pointer returned by support_shared_allocate.  */
++void support_shared_free (void *);
++
++/* Write CONTENTS to the file PATH.  Create or truncate the file as
++   needed.  The file mode is 0666 masked by the umask.  Terminate the
++   process on error.  */
++void support_write_file_string (const char *path, const char *contents);
++
++/* Error-checking wrapper functions which terminate the process on
++   error.  */
++
++void *xmalloc (size_t) __attribute__ ((malloc));
++void *xcalloc (size_t n, size_t s) __attribute__ ((malloc));
++void *xrealloc (void *p, size_t n);
++char *xasprintf (const char *format, ...)
++  __attribute__ ((format (printf, 1, 2), malloc));
++char *xstrdup (const char *);
++
++__END_DECLS
++
++#endif /* SUPPORT_H */
+--- /dev/null
++++ glibc-2.19/support/resolv_test.c
+@@ -0,0 +1,1198 @@
++/* DNS test framework and libresolv redirection.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/resolv_test.h>
++
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <nss.h>
++#include <resolv.h>
++#include <search.h>
++#include <stdlib.h>
++#include <string.h>
++#include <support/check.h>
++#include <support/support.h>
++#include <support/test-driver.h>
++#include <support/xsocket.h>
++#include <support/xthread.h>
++#include <support/xunistd.h>
++#include <sys/uio.h>
++#include <unistd.h>
++
++/* Response builder.  */
++
++enum
++  {
++    max_response_length = 65536
++  };
++
++/* List of pointers to be freed.  The hash table implementation
++   (struct hsearch_data) does not provide a way to deallocate all
++   objects, so this approach is used to avoid memory leaks.  */
++struct to_be_freed
++{
++  struct to_be_freed *next;
++  void *ptr;
++};
++
++struct resolv_response_builder
++{
++  const unsigned char *query_buffer;
++  size_t query_length;
++
++  size_t offset;                /* Bytes written so far in buffer.  */
++  ns_sect section;              /* Current section in the DNS packet.  */
++  unsigned int truncate_bytes;  /* Bytes to remove at end of response. */
++  bool drop;                    /* Discard generated response.  */
++  bool close;                   /* Close TCP client connection.  */
++
++  /* Offset of the two-byte RDATA length field in the currently
++     written RDATA sub-structure.  0 if no RDATA is being written.  */
++  size_t current_rdata_offset;
++
++  /* Hash table for locating targets for label compression.  */
++  struct hsearch_data compression_offsets;
++  /* List of pointers which need to be freed.  Used for domain names
++     involved in label compression.  */
++  struct to_be_freed *to_be_freed;
++
++  /* Must be last.  Not zeroed for performance reasons.  */
++  unsigned char buffer[max_response_length];
++};
++
++/* Response builder. */
++
++/* Add a pointer to the list of pointers to be freed when B is
++   deallocated.  */
++static void
++response_push_pointer_to_free (struct resolv_response_builder *b, void *ptr)
++{
++  if (ptr == NULL)
++    return;
++  struct to_be_freed *e = xmalloc (sizeof (*e));
++  *e = (struct to_be_freed) {b->to_be_freed, ptr};
++  b->to_be_freed = e;
++}
++
++void
++resolv_response_init (struct resolv_response_builder *b,
++                      struct resolv_response_flags flags)
++{
++  if (b->offset > 0)
++    FAIL_EXIT1 ("response_init: called at offset %zu", b->offset);
++  if (b->query_length < 12)
++    FAIL_EXIT1 ("response_init called for a query of size %zu",
++                b->query_length);
++  if (flags.rcode > 15)
++    FAIL_EXIT1 ("response_init: invalid RCODE %u", flags.rcode);
++
++  /* Copy the transaction ID.  */
++  b->buffer[0] = b->query_buffer[0];
++  b->buffer[1] = b->query_buffer[1];
++
++  /* Initialize the flags.  */
++  b->buffer[2] = 0x80;                       /* Mark as response.   */
++  b->buffer[2] |= b->query_buffer[2] & 0x01; /* Copy the RD bit.  */
++  if (flags.tc)
++    b->buffer[2] |= 0x02;
++  b->buffer[3] = 0x80 | flags.rcode; /* Always set RA.  */
++
++  /* Fill in the initial section count values.  */
++  b->buffer[4] = flags.qdcount >> 8;
++  b->buffer[5] = flags.qdcount;
++  b->buffer[6] = flags.ancount >> 8;
++  b->buffer[7] = flags.ancount;
++  b->buffer[8] = flags.nscount >> 8;
++  b->buffer[9] = flags.nscount;
++  b->buffer[10] = flags.adcount >> 8;
++  b->buffer[11] = flags.adcount;
++
++  b->offset = 12;
++}
++
++void
++resolv_response_section (struct resolv_response_builder *b, ns_sect section)
++{
++  if (b->offset == 0)
++    FAIL_EXIT1 ("resolv_response_section: response_init not called before");
++  if (section < b->section)
++    FAIL_EXIT1 ("resolv_response_section: cannot go back to previous section");
++  b->section = section;
++}
++
++/* Add a single byte to B.  */
++static inline void
++response_add_byte (struct resolv_response_builder *b, unsigned char ch)
++{
++  if (b->offset == max_response_length)
++    FAIL_EXIT1 ("DNS response exceeds 64 KiB limit");
++  b->buffer[b->offset] = ch;
++  ++b->offset;
++}
++
++/* Add a 16-bit word VAL to B, in big-endian format.  */
++static void
++response_add_16 (struct resolv_response_builder *b, uint16_t val)
++{
++  response_add_byte (b, val >> 8);
++  response_add_byte (b, val);
++}
++
++/* Increment the pers-section record counter in the packet header.  */
++static void
++response_count_increment (struct resolv_response_builder *b)
++{
++  unsigned int offset = b->section;
++  offset = 4 + 2 * offset;
++  ++b->buffer[offset + 1];
++  if (b->buffer[offset + 1] == 0)
++    {
++      /* Carry.  */
++      ++b->buffer[offset];
++      if (b->buffer[offset] == 0)
++        /* Overflow.  */
++        FAIL_EXIT1 ("too many records in section");
++    }
++}
++
++void
++resolv_response_add_question (struct resolv_response_builder *b,
++                              const char *name, uint16_t class, uint16_t type)
++{
++  if (b->offset == 0)
++    FAIL_EXIT1 ("resolv_response_add_question: "
++                "resolv_response_init not called");
++  if (b->section != ns_s_qd)
++    FAIL_EXIT1 ("resolv_response_add_question: "
++                "must be called in the question section");
++
++  resolv_response_add_name (b, name);
++  response_add_16 (b, type);
++  response_add_16 (b, class);
++
++  response_count_increment (b);
++}
++
++void
++resolv_response_add_name (struct resolv_response_builder *b,
++                          const char *const origname)
++{
++  /* Normalized name.  */
++  char *name;
++  /* Normalized name with case preserved.  */
++  char *name_case;
++  {
++    size_t namelen = strlen (origname);
++    /* Remove trailing dots.  FIXME: Handle trailing quoted dots.  */
++    while (namelen > 0 && origname[namelen - 1] == '.')
++      --namelen;
++    name = xmalloc (namelen + 1);
++    name_case = xmalloc (namelen + 1);
++    /* Copy and convert to lowercase.  FIXME: This needs to normalize
++       escaping as well.  */
++    for (size_t i = 0; i < namelen; ++i)
++      {
++        char ch = origname[i];
++        name_case[i] = ch;
++        if ('A' <= ch && ch <= 'Z')
++          ch = ch - 'A' + 'a';
++        name[i] = ch;
++      }
++    name[namelen] = 0;
++    name_case[namelen] = 0;
++  }
++  char *name_start = name;
++  char *name_case_start = name_case;
++
++  bool compression = false;
++  while (*name)
++    {
++      /* Search for a previous name we can reference.  */
++      ENTRY new_entry =
++        {
++          .key = name,
++          .data = (void *) (uintptr_t) b->offset,
++        };
++
++      /* If the label can be a compression target because it is at a
++         reachable offset, add it to the hash table.  */
++      ACTION action;
++      if (b->offset < (1 << 12))
++        action = ENTER;
++      else
++        action = FIND;
++
++      /* Search for known compression offsets in the hash table.  */
++      ENTRY *e;
++      if (hsearch_r (new_entry, action, &e, &b->compression_offsets) == 0)
++        {
++          if (action == FIND && errno == ESRCH)
++            /* Fall through.  */
++            e = NULL;
++          else
++            FAIL_EXIT1 ("hsearch_r failure in name compression: %m");
++        }
++
++      /* The name is known.  Reference the previous location.  */
++      if (e != NULL && e->data != new_entry.data)
++        {
++          size_t old_offset = (uintptr_t) e->data;
++          response_add_byte (b, 0xC0 | (old_offset >> 8));
++          response_add_byte (b, old_offset);
++          compression = true;
++          break;
++        }
++
++      /* The name does not exist yet.  Write one label.  First, add
++         room for the label length.  */
++      size_t buffer_label_offset = b->offset;
++      response_add_byte (b, 0);
++
++      /* Copy the label.  */
++      while (true)
++        {
++          char ch = *name_case;
++          if (ch == '\0')
++            break;
++          ++name;
++          ++name_case;
++          if (ch == '.')
++            break;
++          /* FIXME: Handle escaping.  */
++          response_add_byte (b, ch);
++        }
++
++      /* Patch in the label length.  */
++      size_t label_length = b->offset - buffer_label_offset - 1;
++      if (label_length == 0)
++        FAIL_EXIT1 ("empty label in name compression: %s", origname);
++      if (label_length > 63)
++        FAIL_EXIT1 ("label too long in name compression: %s", origname);
++      b->buffer[buffer_label_offset] = label_length;
++
++      /* Continue with the tail of the name and the next label.  */
++    }
++
++  if (compression)
++    {
++      /* If we found an immediate match for the name, we have not put
++         it into the hash table, and can free it immediately.  */
++      if (name == name_start)
++        free (name_start);
++      else
++        response_push_pointer_to_free (b, name_start);
++    }
++  else
++    {
++      /* Terminate the sequence of labels.  With compression, this is
++         implicit in the compression reference.  */
++      response_add_byte (b, 0);
++      response_push_pointer_to_free (b, name_start);
++    }
++
++  free (name_case_start);
++}
++
++void
++resolv_response_open_record (struct resolv_response_builder *b,
++                             const char *name,
++                             uint16_t class, uint16_t type, uint32_t ttl)
++{
++  if (b->section == ns_s_qd)
++    FAIL_EXIT1 ("resolv_response_open_record called in question section");
++  if (b->current_rdata_offset != 0)
++    FAIL_EXIT1 ("resolv_response_open_record called with open record");
++
++  resolv_response_add_name (b, name);
++  response_add_16 (b, type);
++  response_add_16 (b, class);
++  response_add_16 (b, ttl >> 16);
++  response_add_16 (b, ttl);
++
++  b->current_rdata_offset = b->offset;
++  /* Add room for the RDATA length.  */
++  response_add_16 (b, 0);
++}
++
++
++void
++resolv_response_close_record (struct resolv_response_builder *b)
++{
++  size_t rdata_offset = b->current_rdata_offset;
++  if (rdata_offset == 0)
++    FAIL_EXIT1 ("response_close_record called without open record");
++  size_t rdata_length = b->offset - rdata_offset - 2;
++  if (rdata_length > 65535)
++    FAIL_EXIT1 ("RDATA length %zu exceeds limit", rdata_length);
++  b->buffer[rdata_offset] = rdata_length >> 8;
++  b->buffer[rdata_offset + 1] = rdata_length;
++  response_count_increment (b);
++  b->current_rdata_offset = 0;
++}
++
++void
++resolv_response_add_data (struct resolv_response_builder *b,
++                          const void *data, size_t length)
++{
++  size_t remaining = max_response_length - b->offset;
++  if (remaining < length)
++    FAIL_EXIT1 ("resolv_response_add_data: not enough room for %zu bytes",
++                length);
++  memcpy (b->buffer + b->offset, data, length);
++  b->offset += length;
++}
++
++void
++resolv_response_drop (struct resolv_response_builder *b)
++{
++  b->drop = true;
++}
++
++void
++resolv_response_close (struct resolv_response_builder *b)
++{
++  b->close = true;
++}
++
++void
++resolv_response_truncate_data (struct resolv_response_builder *b, size_t count)
++{
++  if (count > 65535)
++    FAIL_EXIT1 ("resolv_response_truncate_data: argument too large: %zu",
++                count);
++  b->truncate_bytes = count;
++}
++
++
++size_t
++resolv_response_length (const struct resolv_response_builder *b)
++{
++  return b->offset;
++}
++
++unsigned char *
++resolv_response_buffer (const struct resolv_response_builder *b)
++{
++  unsigned char *result = xmalloc (b->offset);
++  memcpy (result, b->buffer, b->offset);
++  return result;
++}
++
++static struct resolv_response_builder *
++response_builder_allocate
++  (const unsigned char *query_buffer, size_t query_length)
++{
++  struct resolv_response_builder *b = xmalloc (sizeof (*b));
++  memset (b, 0, offsetof (struct resolv_response_builder, buffer));
++  b->query_buffer = query_buffer;
++  b->query_length = query_length;
++  TEST_VERIFY_EXIT (hcreate_r (10000, &b->compression_offsets) != 0);
++  return b;
++}
++
++static void
++response_builder_free (struct resolv_response_builder *b)
++{
++  struct to_be_freed *current = b->to_be_freed;
++  while (current != NULL)
++    {
++      struct to_be_freed *next = current->next;
++      free (current->ptr);
++      free (current);
++      current = next;
++    }
++  hdestroy_r (&b->compression_offsets);
++  free (b);
++}
++
++/* DNS query processing. */
++
++/* Data extracted from the question section of a DNS packet.  */
++struct query_info
++{
++  char qname[MAXDNAME];
++  uint16_t qclass;
++  uint16_t qtype;
++  struct resolv_edns_info edns;
++};
++
++/* Update *INFO from the specified DNS packet.  */
++static void
++parse_query (struct query_info *info,
++             const unsigned char *buffer, size_t length)
++{
++  HEADER hd;
++  _Static_assert (sizeof (hd) == 12, "DNS header size");
++  if (length < sizeof (hd))
++    FAIL_EXIT1 ("malformed DNS query: too short: %zu bytes", length);
++  memcpy (&hd, buffer, sizeof (hd));
++
++  if (ntohs (hd.qdcount) != 1)
++    FAIL_EXIT1 ("malformed DNS query: wrong question count: %d",
++                (int) ntohs (hd.qdcount));
++  if (ntohs (hd.ancount) != 0)
++    FAIL_EXIT1 ("malformed DNS query: wrong answer count: %d",
++                (int) ntohs (hd.ancount));
++  if (ntohs (hd.nscount) != 0)
++    FAIL_EXIT1 ("malformed DNS query: wrong authority count: %d",
++                (int) ntohs (hd.nscount));
++  if (ntohs (hd.arcount) > 1)
++    FAIL_EXIT1 ("malformed DNS query: wrong additional count: %d",
++                (int) ntohs (hd.arcount));
++
++  int ret = dn_expand (buffer, buffer + length, buffer + sizeof (hd),
++                       info->qname, sizeof (info->qname));
++  if (ret < 0)
++    FAIL_EXIT1 ("malformed DNS query: cannot uncompress QNAME");
++
++  /* Obtain QTYPE and QCLASS.  */
++  size_t remaining = length - (12 + ret);
++  struct
++  {
++    uint16_t qtype;
++    uint16_t qclass;
++  } qtype_qclass;
++  if (remaining < sizeof (qtype_qclass))
++    FAIL_EXIT1 ("malformed DNS query: "
++                "query lacks QCLASS/QTYPE, QNAME: %s", info->qname);
++  memcpy (&qtype_qclass, buffer + 12 + ret, sizeof (qtype_qclass));
++  info->qclass = ntohs (qtype_qclass.qclass);
++  info->qtype = ntohs (qtype_qclass.qtype);
++
++  memset (&info->edns, 0, sizeof (info->edns));
++  if (ntohs (hd.arcount) > 0)
++    {
++      /* Parse EDNS record.  */
++      struct __attribute__ ((packed, aligned (1)))
++      {
++        uint8_t root;
++        uint16_t rtype;
++        uint16_t payload;
++        uint8_t edns_extended_rcode;
++        uint8_t edns_version;
++        uint16_t flags;
++        uint16_t rdatalen;
++      } rr;
++      _Static_assert (sizeof (rr) == 11, "EDNS record size");
++
++      if (remaining < 4 + sizeof (rr))
++        FAIL_EXIT1 ("mailformed DNS query: no room for EDNS record");
++      memcpy (&rr, buffer + 12 + ret + 4, sizeof (rr));
++      if (rr.root != 0)
++        FAIL_EXIT1 ("malformed DNS query: invalid OPT RNAME: %d\n", rr.root);
++      if (rr.rtype != htons (41))
++        FAIL_EXIT1 ("malformed DNS query: invalid OPT type: %d\n",
++                    ntohs (rr.rtype));
++      info->edns.active = true;
++      info->edns.extended_rcode = rr.edns_extended_rcode;
++      info->edns.version = rr.edns_version;
++      info->edns.flags = ntohs (rr.flags);
++      info->edns.payload_size = ntohs (rr.payload);
++    }
++}
++
++
++/* Main testing framework.  */
++
++/* Per-server information.  One struct is allocated for each test
++   server.  */
++struct resolv_test_server
++{
++  /* Local address of the server.  UDP and TCP use the same port.  */
++  struct sockaddr_in address;
++
++  /* File descriptor of the UDP server, or -1 if this server is
++     disabled.  */
++  int socket_udp;
++
++  /* File descriptor of the TCP server, or -1 if this server is
++     disabled.  */
++  int socket_tcp;
++
++  /* Counter of the number of responses processed so far.  */
++  size_t response_number;
++
++  /* Thread handles for the server threads (if not disabled in the
++     configuration).  */
++  pthread_t thread_udp;
++  pthread_t thread_tcp;
++};
++
++/* Main struct for keeping track of libresolv redirection and
++   testing.  */
++struct resolv_test
++{
++  /* After initialization, any access to the struct must be performed
++     while this lock is acquired.  */
++  pthread_mutex_t lock;
++
++  /* Data for each test server. */
++  struct resolv_test_server servers[resolv_max_test_servers];
++
++  /* Used if config.single_thread_udp is true.  */
++  pthread_t thread_udp_single;
++
++  struct resolv_redirect_config config;
++  bool termination_requested;
++};
++
++/* Function implementing a server thread.  */
++typedef void (*thread_callback) (struct resolv_test *, int server_index);
++
++/* Storage for thread-specific data, for passing to the
++   thread_callback function.  */
++struct thread_closure
++{
++  struct resolv_test *obj;      /* Current test object.  */
++  thread_callback callback;     /* Function to call.  */
++  int server_index;             /* Index of the implemented server.  */
++};
++
++/* Wrap response_callback as a function which can be passed to
++   pthread_create.  */
++static void *
++thread_callback_wrapper (void *arg)
++{
++  struct thread_closure *closure = arg;
++  closure->callback (closure->obj, closure->server_index);
++  free (closure);
++  return NULL;
++}
++
++/* Start a server thread for the specified SERVER_INDEX, implemented
++   by CALLBACK.  */
++static pthread_t
++start_server_thread (struct resolv_test *obj, int server_index,
++                     thread_callback callback)
++{
++  struct thread_closure *closure = xmalloc (sizeof (*closure));
++  *closure = (struct thread_closure)
++    {
++      .obj = obj,
++      .callback = callback,
++      .server_index = server_index,
++    };
++  return xpthread_create (NULL, thread_callback_wrapper, closure);
++}
++
++/* Process one UDP query.  Return false if a termination requested has
++   been detected.  */
++static bool
++server_thread_udp_process_one (struct resolv_test *obj, int server_index)
++{
++  unsigned char query[512];
++  struct sockaddr_storage peer;
++  socklen_t peerlen = sizeof (peer);
++  size_t length = xrecvfrom (obj->servers[server_index].socket_udp,
++                             query, sizeof (query), 0,
++                             (struct sockaddr *) &peer, &peerlen);
++  /* Check for termination.  */
++  {
++    bool termination_requested;
++    xpthread_mutex_lock (&obj->lock);
++    termination_requested = obj->termination_requested;
++    xpthread_mutex_unlock (&obj->lock);
++    if (termination_requested)
++      return false;
++  }
++
++
++  struct query_info qinfo;
++  parse_query (&qinfo, query, length);
++  if (test_verbose > 0)
++    {
++      if (test_verbose > 1)
++        printf ("info: UDP server %d: incoming query:"
++                " %zd bytes, %s/%u/%u, tnxid=0x%02x%02x\n",
++                server_index, length, qinfo.qname, qinfo.qclass, qinfo.qtype,
++                query[0], query[1]);
++      else
++        printf ("info: UDP server %d: incoming query:"
++                " %zd bytes, %s/%u/%u\n",
++                server_index, length, qinfo.qname, qinfo.qclass, qinfo.qtype);
++    }
++
++  struct resolv_response_context ctx =
++    {
++      .query_buffer = query,
++      .query_length = length,
++      .server_index = server_index,
++      .tcp = false,
++      .edns = qinfo.edns,
++    };
++  struct resolv_response_builder *b = response_builder_allocate (query, length);
++  obj->config.response_callback
++    (&ctx, b, qinfo.qname, qinfo.qclass, qinfo.qtype);
++
++  if (b->drop)
++    {
++      if (test_verbose)
++        printf ("info: UDP server %d: dropping response to %s/%u/%u\n",
++                server_index, qinfo.qname, qinfo.qclass, qinfo.qtype);
++    }
++  else
++    {
++      if (test_verbose)
++        {
++          if (b->offset >= 12)
++            printf ("info: UDP server %d: sending response:"
++                    " %zu bytes, RCODE %d (for %s/%u/%u)\n",
++                    server_index, b->offset, b->buffer[3] & 0x0f,
++                    qinfo.qname, qinfo.qclass, qinfo.qtype);
++          else
++            printf ("info: UDP server %d: sending response: %zu bytes"
++                    " (for %s/%u/%u)\n",
++                    server_index, b->offset,
++                    qinfo.qname, qinfo.qclass, qinfo.qtype);
++          if (b->truncate_bytes > 0)
++            printf ("info:    truncated by %u bytes\n", b->truncate_bytes);
++        }
++      size_t to_send = b->offset;
++      if (to_send < b->truncate_bytes)
++        to_send = 0;
++      else
++        to_send -= b->truncate_bytes;
++
++      /* Ignore most errors here because the other end may have closed
++         the socket. */
++      if (sendto (obj->servers[server_index].socket_udp,
++                  b->buffer, to_send, 0,
++                  (struct sockaddr *) &peer, peerlen) < 0)
++        TEST_VERIFY_EXIT (errno != EBADF);
++    }
++  response_builder_free (b);
++  return true;
++}
++
++/* UDP thread_callback function.  Variant for one thread per
++   server.  */
++static void
++server_thread_udp (struct resolv_test *obj, int server_index)
++{
++  while (server_thread_udp_process_one (obj, server_index))
++    ;
++}
++
++/* Single-threaded UDP processing function, for the single_thread_udp
++   case.  */
++static void *
++server_thread_udp_single (void *closure)
++{
++  struct resolv_test *obj = closure;
++
++  struct pollfd fds[resolv_max_test_servers];
++  for (int server_index = 0; server_index < resolv_max_test_servers;
++       ++server_index)
++    if (obj->config.servers[server_index].disable_udp)
++      fds[server_index] = (struct pollfd) {.fd = -1};
++    else
++      {
++        fds[server_index] = (struct pollfd)
++          {
++            .fd = obj->servers[server_index].socket_udp,
++            .events = POLLIN
++          };
++
++        /* Make the socket non-blocking.  */
++        int flags = fcntl (obj->servers[server_index].socket_udp, F_GETFL, 0);
++        if (flags < 0)
++          FAIL_EXIT1 ("fcntl (F_GETFL): %m");
++        flags |= O_NONBLOCK;
++        if (fcntl (obj->servers[server_index].socket_udp, F_SETFL, flags) < 0)
++          FAIL_EXIT1 ("fcntl (F_SETFL): %m");
++      }
++
++  while (true)
++    {
++      xpoll (fds, resolv_max_test_servers, -1);
++      for (int server_index = 0; server_index < resolv_max_test_servers;
++           ++server_index)
++        if (fds[server_index].revents != 0)
++          {
++            if (!server_thread_udp_process_one (obj, server_index))
++              goto out;
++            fds[server_index].revents = 0;
++          }
++    }
++
++ out:
++  return NULL;
++}
++
++/* Start the single UDP handler thread (for the single_thread_udp
++   case).  */
++static void
++start_server_thread_udp_single (struct resolv_test *obj)
++{
++  obj->thread_udp_single
++    = xpthread_create (NULL, server_thread_udp_single, obj);
++}
++
++/* Data describing a TCP client connect.  */
++struct tcp_thread_closure
++{
++  struct resolv_test *obj;
++  int server_index;
++  int client_socket;
++};
++
++/* Read a complete DNS query packet.  If EOF_OK, an immediate
++   end-of-file condition is acceptable.  */
++static bool
++read_fully (int fd, void *buf, size_t len, bool eof_ok)
++{
++  const void *const end = buf + len;
++  while (buf < end)
++    {
++      ssize_t ret = read (fd, buf, end - buf);
++      if (ret == 0)
++        {
++          if (!eof_ok)
++            {
++              support_record_failure ();
++              printf ("error: unexpected EOF on TCP connection\n");
++            }
++          return false;
++        }
++      else if (ret < 0)
++        {
++          if (!eof_ok || errno != ECONNRESET)
++            {
++              support_record_failure ();
++              printf ("error: TCP read: %m\n");
++            }
++          return false;
++        }
++      buf += ret;
++      eof_ok = false;
++    }
++  return true;
++}
++
++/* Write an array of iovecs.  Terminate the process on failure.  */
++static void
++writev_fully (int fd, struct iovec *buffers, size_t count)
++{
++  while (count > 0)
++    {
++      /* Skip zero-length write requests.  */
++      if (buffers->iov_len == 0)
++        {
++          ++buffers;
++          --count;
++          continue;
++        }
++      /* Try to rewrite the remaing buffers.  */
++      ssize_t ret = writev (fd, buffers, count);
++      if (ret < 0)
++        FAIL_EXIT1 ("writev: %m");
++      if (ret == 0)
++        FAIL_EXIT1 ("writev: invalid return value zero");
++      /* Find the buffers that were successfully written.  */
++      while (ret > 0)
++        {
++          if (count == 0)
++            FAIL_EXIT1 ("internal writev consistency failure");
++          /* Current buffer was partially written.  */
++          if (buffers->iov_len > (size_t) ret)
++            {
++              buffers->iov_base += ret;
++              buffers->iov_len -= ret;
++              ret = 0;
++            }
++          else
++            {
++              ret -= buffers->iov_len;
++              buffers->iov_len = 0;
++              ++buffers;
++              --count;
++            }
++        }
++    }
++}
++
++/* Thread callback for handling a single established TCP connection to
++   a client.  */
++static void *
++server_thread_tcp_client (void *arg)
++{
++  struct tcp_thread_closure *closure = arg;
++
++  while (true)
++    {
++      /* Read packet length.  */
++      uint16_t query_length;
++      if (!read_fully (closure->client_socket,
++                       &query_length, sizeof (query_length), true))
++        break;
++      query_length = ntohs (query_length);
++
++      /* Read the packet.  */
++      unsigned char *query_buffer = xmalloc (query_length);
++      read_fully (closure->client_socket, query_buffer, query_length, false);
++
++      struct query_info qinfo;
++      parse_query (&qinfo, query_buffer, query_length);
++      if (test_verbose > 0)
++        {
++          if (test_verbose > 1)
++            printf ("info: UDP server %d: incoming query:"
++                    " %d bytes, %s/%u/%u, tnxid=0x%02x%02x\n",
++                    closure->server_index, query_length,
++                    qinfo.qname, qinfo.qclass, qinfo.qtype,
++                    query_buffer[0], query_buffer[1]);
++          else
++            printf ("info: TCP server %d: incoming query:"
++                    " %u bytes, %s/%u/%u\n",
++                    closure->server_index, query_length,
++                    qinfo.qname, qinfo.qclass, qinfo.qtype);
++        }
++
++      struct resolv_response_context ctx =
++        {
++          .query_buffer = query_buffer,
++          .query_length = query_length,
++          .server_index = closure->server_index,
++          .tcp = true,
++          .edns = qinfo.edns,
++        };
++      struct resolv_response_builder *b = response_builder_allocate
++        (query_buffer, query_length);
++      closure->obj->config.response_callback
++        (&ctx, b, qinfo.qname, qinfo.qclass, qinfo.qtype);
++
++      if (b->drop)
++        {
++          if (test_verbose)
++            printf ("info: TCP server %d: dropping response to %s/%u/%u\n",
++                    closure->server_index,
++                    qinfo.qname, qinfo.qclass, qinfo.qtype);
++        }
++      else
++        {
++          if (test_verbose)
++            printf ("info: TCP server %d: sending response: %zu bytes"
++                    " (for %s/%u/%u)\n",
++                    closure->server_index, b->offset,
++                    qinfo.qname, qinfo.qclass, qinfo.qtype);
++          uint16_t length = htons (b->offset);
++          size_t to_send = b->offset;
++          if (to_send < b->truncate_bytes)
++            to_send = 0;
++          else
++            to_send -= b->truncate_bytes;
++          struct iovec buffers[2] =
++            {
++              {&length, sizeof (length)},
++              {b->buffer, to_send}
++            };
++          writev_fully (closure->client_socket, buffers, 2);
++        }
++      bool close_flag = b->close;
++      response_builder_free (b);
++      free (query_buffer);
++      if (close_flag)
++        break;
++    }
++
++  xclose (closure->client_socket);
++  free (closure);
++  return NULL;
++}
++
++/* thread_callback for the TCP case.  Accept connections and create a
++   new thread for each client.  */
++static void
++server_thread_tcp (struct resolv_test *obj, int server_index)
++{
++  while (true)
++    {
++      /* Get the client conenction.  */
++      int client_socket = xaccept
++        (obj->servers[server_index].socket_tcp, NULL, NULL);
++
++      /* Check for termination.  */
++      xpthread_mutex_lock (&obj->lock);
++      if (obj->termination_requested)
++        {
++          xpthread_mutex_unlock (&obj->lock);
++          xclose (client_socket);
++          break;
++        }
++      xpthread_mutex_unlock (&obj->lock);
++
++      /* Spawn a new thread for handling this connection.  */
++      struct tcp_thread_closure *closure = xmalloc (sizeof (*closure));
++      *closure = (struct tcp_thread_closure)
++        {
++          .obj = obj,
++          .server_index = server_index,
++          .client_socket = client_socket,
++        };
++
++      pthread_t thr
++        = xpthread_create (NULL, server_thread_tcp_client, closure);
++      /* TODO: We should keep track of this thread so that we can
++         block in resolv_test_end until it has exited.  */
++      xpthread_detach (thr);
++    }
++}
++
++/* Create UDP and TCP server sockets.  */
++static void
++make_server_sockets (struct resolv_test_server *server)
++{
++  while (true)
++    {
++      server->socket_udp = xsocket (AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++      server->socket_tcp = xsocket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
++
++      /* Pick the address for the UDP socket.  */
++      server->address = (struct sockaddr_in)
++        {
++          .sin_family = AF_INET,
++          .sin_addr = {.s_addr = htonl (INADDR_LOOPBACK)}
++        };
++      xbind (server->socket_udp,
++             (struct sockaddr *)&server->address, sizeof (server->address));
++
++      /* Retrieve the address. */
++      socklen_t addrlen = sizeof (server->address);
++      xgetsockname (server->socket_udp,
++                    (struct sockaddr *)&server->address, &addrlen);
++
++      /* Bind the TCP socket to the same address.  */
++      {
++        int on = 1;
++        xsetsockopt (server->socket_tcp, SOL_SOCKET, SO_REUSEADDR,
++                     &on, sizeof (on));
++      }
++      if (bind (server->socket_tcp,
++                (struct sockaddr *)&server->address,
++                sizeof (server->address)) != 0)
++        {
++          /* Port collision.  The UDP bind succeeded, but the TCP BIND
++             failed.  We assume here that the kernel will pick the
++             next local UDP address randomly.  */
++          if (errno == EADDRINUSE)
++            {
++              xclose (server->socket_udp);
++              xclose (server->socket_tcp);
++              continue;
++            }
++          FAIL_EXIT1 ("TCP bind: %m");
++        }
++      xlisten (server->socket_tcp, 5);
++      break;
++    }
++}
++
++/* One-time initialization of NSS.  */
++static void
++resolv_redirect_once (void)
++{
++  /* Only use nss_dns.  */
++  __nss_configure_lookup ("hosts", "dns");
++  __nss_configure_lookup ("networks", "dns");
++  /* Skip namespace stuff. The tests will still work, but they
++     may be less reliable.  */
++}
++pthread_once_t resolv_redirect_once_var = PTHREAD_ONCE_INIT;
++
++void
++resolv_test_init (void)
++{
++  /* Perform one-time initialization of NSS.  */
++  xpthread_once (&resolv_redirect_once_var, resolv_redirect_once);
++}
++
++/* Copy the search path from CONFIG.search to the _res object.  */
++static void
++set_search_path (struct resolv_redirect_config config)
++{
++  memset (_res.defdname, 0, sizeof (_res.defdname));
++  memset (_res.dnsrch, 0, sizeof (_res.dnsrch));
++
++  char *current = _res.defdname;
++  char *end = current + sizeof (_res.defdname);
++
++  for (unsigned int i = 0;
++       i < sizeof (config.search) / sizeof (config.search[0]); ++i)
++    {
++      if (config.search[i] == NULL)
++        continue;
++
++      size_t length = strlen (config.search[i]) + 1;
++      size_t remaining = end - current;
++      TEST_VERIFY_EXIT (length <= remaining);
++      memcpy (current, config.search[i], length);
++      _res.dnsrch[i] = current;
++      current += length;
++    }
++}
++
++struct resolv_test *
++resolv_test_start (struct resolv_redirect_config config)
++{
++  /* Apply configuration defaults.  */
++  if (config.nscount == 0)
++    config.nscount = resolv_max_test_servers;
++
++  struct resolv_test *obj = xmalloc (sizeof (*obj));
++  *obj = (struct resolv_test) {
++    .config = config,
++    .lock = PTHREAD_MUTEX_INITIALIZER,
++  };
++
++  resolv_test_init ();
++
++  /* Create all the servers, to reserve the necessary ports.  */
++  for (int server_index = 0; server_index < config.nscount; ++server_index)
++    make_server_sockets (obj->servers + server_index);
++
++  /* Start server threads.  Disable the server ports, as
++     requested.  */
++  for (int server_index = 0; server_index < config.nscount; ++server_index)
++    {
++      struct resolv_test_server *server = obj->servers + server_index;
++      if (config.servers[server_index].disable_udp)
++        {
++          xclose (server->socket_udp);
++          server->socket_udp = -1;
++        }
++      else if (!config.single_thread_udp)
++        server->thread_udp = start_server_thread (obj, server_index,
++                                                  server_thread_udp);
++      if (config.servers[server_index].disable_tcp)
++        {
++          xclose (server->socket_tcp);
++          server->socket_tcp = -1;
++        }
++      else
++        server->thread_tcp = start_server_thread (obj, server_index,
++                                                  server_thread_tcp);
++    }
++  if (config.single_thread_udp)
++    start_server_thread_udp_single (obj);
++
++  int timeout = 1;
++
++  /* Initialize libresolv.  */
++  TEST_VERIFY_EXIT (res_init () == 0);
++
++  /* Disable IPv6 name server addresses.  The code below only
++     overrides the IPv4 addresses.  */
++  __res_iclose (&_res, true);
++  _res._u._ext.nscount = 0;
++
++  /* Redirect queries to the server socket.  */
++  if (test_verbose)
++    {
++      printf ("info: old timeout value: %d\n", _res.retrans);
++      printf ("info: old retry attempt value: %d\n", _res.retry);
++      printf ("info: old _res.options: 0x%lx\n", _res.options);
++      printf ("info: old _res.nscount value: %d\n", _res.nscount);
++      printf ("info: old _res.ndots value: %d\n", _res.ndots);
++    }
++  _res.retrans = timeout;
++  _res.retry = 4;
++  _res.nscount = config.nscount;
++  _res.options = RES_INIT | RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
++  _res.ndots = 1;
++  if (test_verbose)
++    {
++      printf ("info: new timeout value: %d\n", _res.retrans);
++      printf ("info: new retry attempt value: %d\n", _res.retry);
++      printf ("info: new _res.options: 0x%lx\n", _res.options);
++      printf ("info: new _res.nscount value: %d\n", _res.nscount);
++      printf ("info: new _res.ndots value: %d\n", _res.ndots);
++    }
++  for (int server_index = 0; server_index < config.nscount; ++server_index)
++    {
++      _res.nsaddr_list[server_index] = obj->servers[server_index].address;
++      if (test_verbose)
++        {
++          char buf[256];
++          TEST_VERIFY_EXIT
++            (inet_ntop (AF_INET, &obj->servers[server_index].address.sin_addr,
++                        buf, sizeof (buf)) != NULL);
++          printf ("info: server %d: %s/%u\n",
++                  server_index, buf,
++                  htons (obj->servers[server_index].address.sin_port));
++        }
++    }
++
++  set_search_path (config);
++
++  return obj;
++}
++
++void
++resolv_test_end (struct resolv_test *obj)
++{
++  res_close ();
++
++  xpthread_mutex_lock (&obj->lock);
++  obj->termination_requested = true;
++  xpthread_mutex_unlock (&obj->lock);
++
++  /* Send trigger packets to unblock the server threads.  */
++  for (int server_index = 0; server_index < obj->config.nscount;
++       ++server_index)
++    {
++      if (!obj->config.servers[server_index].disable_udp)
++        {
++          int sock = xsocket (AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++          xsendto (sock, "", 1, 0,
++                   (struct sockaddr *) &obj->servers[server_index].address,
++                   sizeof (obj->servers[server_index].address));
++          xclose (sock);
++        }
++      if (!obj->config.servers[server_index].disable_tcp)
++        {
++          int sock = xsocket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
++          xconnect (sock,
++                    (struct sockaddr *) &obj->servers[server_index].address,
++                    sizeof (obj->servers[server_index].address));
++          xclose (sock);
++        }
++    }
++
++  if (obj->config.single_thread_udp)
++    xpthread_join (obj->thread_udp_single);
++
++  /* Wait for the server threads to terminate.  */
++  for (int server_index = 0; server_index < obj->config.nscount;
++       ++server_index)
++    {
++      if (!obj->config.servers[server_index].disable_udp)
++        {
++          if (!obj->config.single_thread_udp)
++            xpthread_join (obj->servers[server_index].thread_udp);
++          xclose (obj->servers[server_index].socket_udp);
++        }
++      if (!obj->config.servers[server_index].disable_tcp)
++        {
++          xpthread_join (obj->servers[server_index].thread_tcp);
++          xclose (obj->servers[server_index].socket_tcp);
++        }
++    }
++
++  free (obj);
++}
+--- /dev/null
++++ glibc-2.19/support/resolv_test.h
+@@ -0,0 +1,180 @@
++/* DNS test framework and libresolv redirection.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_RESOLV_TEST_H
++#define SUPPORT_RESOLV_TEST_H
++
++#include <arpa/nameser.h>
++#include <stdbool.h>
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++/* Information about EDNS properties of a DNS query.  */
++struct resolv_edns_info
++{
++  bool active;
++  uint8_t extended_rcode;
++  uint8_t version;
++  uint16_t flags;
++  uint16_t payload_size;
++};
++
++/* This struct provides context information when the response callback
++   specified in struct resolv_redirect_config is invoked. */
++struct resolv_response_context
++{
++  const unsigned char *query_buffer;
++  size_t query_length;
++  int server_index;
++  bool tcp;
++  struct resolv_edns_info edns;
++};
++
++/* This opaque struct is used to construct responses from within the
++   response callback function.  */
++struct resolv_response_builder;
++
++/* This opaque struct collects information about the resolver testing
++   currently in progress.  */
++struct resolv_test;
++
++enum
++  {
++    /* Maximum number of test servers supported by the framework.  */
++    resolv_max_test_servers = 3,
++  };
++
++/* Configuration settings specific to individual test servers.  */
++struct resolv_redirect_server_config
++{
++  bool disable_tcp;             /* If true, no TCP server is listening.  */
++  bool disable_udp;             /* If true, no UDP server is listening.  */
++};
++
++/* Instructions for setting up the libresolv redirection.  */
++struct resolv_redirect_config
++{
++  /* The response_callback function is called for every incoming DNS
++     packet, over UDP or TCP.  It must be specified, the other
++     configuration settings are optional.  */
++  void (*response_callback) (const struct resolv_response_context *,
++                             struct resolv_response_builder *,
++                             const char *qname,
++                             uint16_t qclass, uint16_t qtype);
++
++  /* Per-server configuration.  */
++  struct resolv_redirect_server_config servers[resolv_max_test_servers];
++
++  /* Search path entries.  The first entry serves as the default
++     domain name as well.  */
++  const char *search[7];
++
++  /* Number of servers to activate in resolv.  0 means the default,
++     resolv_max_test_servers.  */
++  int nscount;
++
++  /* If true, use a single thread to process all UDP queries.  This
++     may results in more predictable ordering of queries and
++     responses.  */
++  bool single_thread_udp;
++};
++
++/* Configure NSS to use, nss_dns only for aplicable databases, and try
++   to put the process into a network namespace for better isolation.
++   This may have to be called before resolv_test_start, before the
++   process creates any threads.  Otherwise, initialization is
++   performed by resolv_test_start implicitly.  */
++void resolv_test_init (void);
++
++/* Initiate resolver testing.  This updates the _res variable as
++   needed.  As a side effect, NSS is reconfigured to use nss_dns only
++   for aplicable databases, and the process may enter a network
++   namespace for better isolation.  */
++struct resolv_test *resolv_test_start (struct resolv_redirect_config);
++
++/* Call this function at the end of resolver testing, to free
++   resources and report pending errors (if any).  */
++void resolv_test_end (struct resolv_test *);
++
++/* The remaining facilities in this file are used for constructing
++   response packets from the response_callback function.  */
++
++/* Special settings for constructing responses from the callback.  */
++struct resolv_response_flags
++{
++  /* 4-bit response code to incorporate into the response. */
++  unsigned char rcode;
++
++  /* If true, the TC (truncation) flag will be set.  */
++  bool tc;
++
++  /* Initial section count values.  Can be used to artificially
++     increase the counts, for malformed packet testing.*/
++  unsigned short qdcount;
++  unsigned short ancount;
++  unsigned short nscount;
++  unsigned short adcount;
++};
++
++/* Begin a new response with the requested flags.  Must be called
++   first.  */
++void resolv_response_init (struct resolv_response_builder *,
++                           struct resolv_response_flags);
++
++/* Switches to the section in the response packet.  Only forward
++   movement is supported.  */
++void resolv_response_section (struct resolv_response_builder *, ns_sect);
++
++/* Add a question record to the question section.  */
++void resolv_response_add_question (struct resolv_response_builder *,
++                                   const char *name, uint16_t class,
++                                   uint16_t type);
++/* Starts a new resource record with the specified owner name, class,
++   type, and TTL.  Data is supplied with resolv_response_add_data or
++   resolv_response_add_name.  */
++void resolv_response_open_record (struct resolv_response_builder *,
++                                  const char *name, uint16_t class,
++                                  uint16_t type, uint32_t ttl);
++
++/* Add unstructed bytes to the RDATA part of a resource record.  */
++void resolv_response_add_data (struct resolv_response_builder *,
++                               const void *, size_t);
++
++/* Add a compressed domain name to the RDATA part of a resource
++   record.  */
++void resolv_response_add_name (struct resolv_response_builder *,
++                               const char *name);
++
++/* Mark the end of the constructed record.  Must be called last.  */
++void resolv_response_close_record (struct resolv_response_builder *);
++
++/* Drop this query packet (that is, do not send a response, not even
++   an empty packet).  */
++void resolv_response_drop (struct resolv_response_builder *);
++
++/* In TCP mode, close the connection after this packet (if a response
++   is sent).  */
++void resolv_response_close (struct resolv_response_builder *);
++
++/* The size of the response packet built so far.  */
++size_t resolv_response_length (const struct resolv_response_builder *);
++
++__END_DECLS
++
++#endif /* SUPPORT_RESOLV_TEST_H */
+--- /dev/null
++++ glibc-2.19/support/xsocket.h
+@@ -0,0 +1,39 @@
++/* Error-checking wrappers for socket functions.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_XSOCKET_H
++#define SUPPORT_XSOCKET_H
++
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++
++int xsocket (int, int, int);
++void xsetsockopt (int, int, int, const void *, socklen_t);
++void xgetsockname (int, struct sockaddr *, socklen_t *);
++void xconnect (int, const struct sockaddr *, socklen_t);
++void xbind (int, const struct sockaddr *, socklen_t);
++void xlisten (int, int);
++int xaccept (int, struct sockaddr *, socklen_t *);
++int xaccept4 (int, struct sockaddr *, socklen_t *, int);
++void xsendto (int, const void *, size_t, int,
++              const struct sockaddr *, socklen_t);
++size_t xrecvfrom (int, void *, size_t, int, struct sockaddr *, socklen_t *);
++int xpoll (struct pollfd *, nfds_t, int);
++
++#endif /* SUPPORT_XSOCKET_H */
+--- /dev/null
++++ glibc-2.19/support/xunistd.h
+@@ -0,0 +1,56 @@
++/* POSIX-specific extra functions.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* These wrapper functions use POSIX types and therefore cannot be
++   declared in <support/support.h>.  */
++
++#ifndef SUPPORT_XUNISTD_H
++#define SUPPORT_XUNISTD_H
++
++#include <sys/cdefs.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++__BEGIN_DECLS
++
++struct stat64;
++
++pid_t xfork (void);
++pid_t xwaitpid (pid_t, int *status, int flags);
++void xpipe (int[2]);
++void xdup2 (int, int);
++int xopen (const char *path, int flags, mode_t);
++void xstat (const char *path, struct stat64 *);
++void xmkdir (const char *path, mode_t);
++void xchroot (const char *path);
++
++/* Close the file descriptor.  Ignore EINTR errors, but terminate the
++   process on other errors.  */
++void xclose (int);
++
++/* Write the buffer.  Retry on short writes.  */
++void xwrite (int, const void *, size_t);
++
++/* Invoke mmap with a zero file offset.  */
++void *xmmap (void *addr, size_t length, int prot, int flags, int fd);
++
++void xmunmap (void *addr, size_t length);
++
++__END_DECLS
++
++#endif /* SUPPORT_XUNISTD_H */
+--- /dev/null
++++ glibc-2.19/support/xthread.h
+@@ -0,0 +1,77 @@
++/* Support functionality for using threads.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef SUPPORT_THREAD_H
++#define SUPPORT_THREAD_H
++
++#include <pthread.h>
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++/* Terminate the process (with exit status 0) after SECONDS have
++   elapsed, from a helper thread.  The process is terminated with the
++   exit function, so atexit handlers are executed.  */
++void delayed_exit (int seconds);
++
++/* Terminate the process (with exit status 1) if VALUE is not zero.
++   In that case, print a failure message to standard output mentioning
++   FUNCTION.  The process is terminated with the exit function, so
++   atexit handlers are executed.  */
++void xpthread_check_return (const char *function, int value);
++
++/* The following functions call the corresponding libpthread functions
++   and terminate the process on error.  */
++
++void xpthread_barrier_init (pthread_barrier_t *barrier,
++                            pthread_barrierattr_t *attr, unsigned int count);
++void xpthread_barrier_destroy (pthread_barrier_t *barrier);
++void xpthread_mutexattr_destroy (pthread_mutexattr_t *);
++void xpthread_mutexattr_init (pthread_mutexattr_t *);
++void xpthread_mutexattr_setprotocol (pthread_mutexattr_t *, int);
++void xpthread_mutexattr_setpshared (pthread_mutexattr_t *, int);
++void xpthread_mutexattr_setrobust (pthread_mutexattr_t *, int);
++void xpthread_mutexattr_settype (pthread_mutexattr_t *, int);
++void xpthread_mutex_init (pthread_mutex_t *, const pthread_mutexattr_t *);
++void xpthread_mutex_destroy (pthread_mutex_t *);
++void xpthread_mutex_lock (pthread_mutex_t *mutex);
++void xpthread_mutex_unlock (pthread_mutex_t *mutex);
++void xpthread_mutex_consistent (pthread_mutex_t *);
++void xpthread_spin_lock (pthread_spinlock_t *lock);
++void xpthread_spin_unlock (pthread_spinlock_t *lock);
++void xpthread_cond_wait (pthread_cond_t * cond, pthread_mutex_t * mutex);
++pthread_t xpthread_create (pthread_attr_t *attr,
++                           void *(*thread_func) (void *), void *closure);
++void xpthread_detach (pthread_t thr);
++void xpthread_cancel (pthread_t thr);
++void *xpthread_join (pthread_t thr);
++void xpthread_once (pthread_once_t *guard, void (*func) (void));
++void xpthread_attr_destroy (pthread_attr_t *attr);
++void xpthread_attr_init (pthread_attr_t *attr);
++void xpthread_attr_setdetachstate (pthread_attr_t *attr,
++				   int detachstate);
++void xpthread_attr_setstacksize (pthread_attr_t *attr,
++				 size_t stacksize);
++
++/* This function returns non-zero if pthread_barrier_wait returned
++   PTHREAD_BARRIER_SERIAL_THREAD.  */
++int xpthread_barrier_wait (pthread_barrier_t *barrier);
++
++__END_DECLS
++
++#endif /* SUPPORT_THREAD_H */
+--- /dev/null
++++ glibc-2.19/support/Makefile
+@@ -0,0 +1,69 @@
++# Makefile for support library, used only at build and test time
++# Copyright (C) 2016-2017 Free Software Foundation, Inc.
++# This file is part of the GNU C Library.
++
++# The GNU C Library is free software; you can redistribute it and/or
++# modify it under the terms of the GNU Lesser General Public
++# License as published by the Free Software Foundation; either
++# version 2.1 of the License, or (at your option) any later version.
++
++# The GNU C Library is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# Lesser General Public License for more details.
++
++# You should have received a copy of the GNU Lesser General Public
++# License along with the GNU C Library; if not, see
++# <http://www.gnu.org/licenses/>.
++
++subdir := support
++
++include ../Makeconfig
++
++extra-libs := libsupport
++extra-libs-others = $(extra-libs)
++extra-libs-noinstall := $(extra-libs)
++
++libsupport-routines = \
++  check \
++  oom_error \
++  resolv_test \
++  support_record_failure \
++  support_test_main \
++  support_test_verify_impl \
++  temp_file \
++  write_message \
++  xaccept \
++  xasprintf \
++  xbind \
++  xcalloc \
++  xclose \
++  xconnect \
++  xgetsockname \
++  xlisten \
++  xmalloc \
++  xpoll \
++  xpthread_check_return \
++  xpthread_create \
++  xpthread_detach \
++  xpthread_join \
++  xpthread_mutex_lock \
++  xpthread_mutex_unlock \
++  xpthread_once \
++  xrealloc \
++  xrecvfrom \
++  xsendto \
++  xsetsockopt \
++  xsocket \
++  xstrdup \
++
++libsupport-static-only-routines := $(libsupport-routines)
++# Only build one variant of the library.
++libsupport-inhibit-o := .os
++ifeq ($(build-shared),yes)
++libsupport-inhibit-o += .o
++endif
++
++tests =
++
++include ../Rules
+--- /dev/null
++++ glibc-2.19/support/support_record_failure.c
+@@ -0,0 +1,106 @@
++/* Global test failure counter.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/check.h>
++#include <support/support.h>
++#include <support/test-driver.h>
++
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++/* This structure keeps track of test failures.  The counter is
++   incremented on each failure.  The failed member is set to true if a
++   failure is detected, so that even if the counter wraps around to
++   zero, the failure of a test can be detected.
++
++   The init constructor function below puts *state on a shared
++   annonymous mapping, so that failure reports from subprocesses
++   propagate to the parent process.  */
++struct test_failures
++{
++  unsigned int counter;
++  unsigned int failed;
++};
++static struct test_failures *state;
++
++static __attribute__ ((constructor)) void
++init (void)
++{
++  void *ptr = mmap (NULL, sizeof (*state), PROT_READ | PROT_WRITE,
++                    MAP_ANONYMOUS | MAP_SHARED, -1, 0);
++  if (ptr == MAP_FAILED)
++    {
++      printf ("error: could not map %zu bytes: %m\n", sizeof (*state));
++      exit (1);
++    }
++  /* Zero-initialization of the struct is sufficient.  */
++  state = ptr;
++}
++
++void
++support_record_failure (void)
++{
++  if (state == NULL)
++    {
++      write_message
++        ("error: support_record_failure called without initialization\n");
++      _exit (1);
++    }
++  /* Relaxed MO is sufficient because we are only interested in the
++     values themselves, in isolation.  */
++  __atomic_store_n (&state->failed, 1, __ATOMIC_RELEASE);
++  __atomic_add_fetch (&state->counter, 1, __ATOMIC_RELEASE);
++}
++
++int
++support_report_failure (int status)
++{
++  if (state == NULL)
++    {
++      write_message
++        ("error: support_report_failure called without initialization\n");
++      return 1;
++    }
++
++  /* Relaxed MO is sufficient because acquire test result reporting
++     assumes that exiting from the main thread happens before the
++     error reporting via support_record_failure, which requires some
++     form of external synchronization.  */
++  bool failed = __atomic_load_n (&state->failed, __ATOMIC_RELAXED);
++  if (failed)
++    printf ("error: %u test failures\n",
++            __atomic_load_n (&state->counter, __ATOMIC_RELAXED));
++
++  if ((status == 0 || status == EXIT_UNSUPPORTED) && failed)
++    /* If we have a recorded failure, it overrides a non-failure
++       report from the test function.  */
++    status = 1;
++  return status;
++}
++
++void
++support_record_failure_reset (void)
++{
++  /* Only used for testing the test framework, with external
++     synchronization, but use release MO for consistency.  */
++  __atomic_store_n (&state->failed, 0, __ATOMIC_RELAXED);
++  __atomic_add_fetch (&state->counter, 0, __ATOMIC_RELAXED);
++}
+--- /dev/null
++++ glibc-2.19/support/xaccept.c
+@@ -0,0 +1,32 @@
++/* accept with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++int
++xaccept (int fd, struct sockaddr *sa, socklen_t *salen)
++{
++  int clientfd = accept (fd, sa, salen);
++  if (clientfd < 0)
++    FAIL_EXIT1 ("accept (%d): %m", fd);
++  return clientfd;
++}
+--- /dev/null
++++ glibc-2.19/support/xasprintf.c
+@@ -0,0 +1,36 @@
++/* Error-checking wrapper for asprintf.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++char *
++xasprintf (const char *format, ...)
++{
++  va_list ap;
++  va_start (ap, format);
++  char *result;
++  if (vasprintf (&result, format, ap) < 0)
++    FAIL_EXIT1 ("asprintf: %m");
++  va_end (ap);
++  return result;
++}
+--- /dev/null
++++ glibc-2.19/support/xbind.c
+@@ -0,0 +1,30 @@
++/* bind with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xbind (int fd, const struct sockaddr *sa, socklen_t sa_len)
++{
++  if (bind (fd, sa, sa_len) != 0)
++    FAIL_EXIT1 ("bind (%d), family %d: %m", fd, sa->sa_family);
++}
+--- /dev/null
++++ glibc-2.19/support/xcalloc.c
+@@ -0,0 +1,34 @@
++/* Error-checking wrapper for calloc.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++void *
++xcalloc (size_t n, size_t s)
++{
++  void *p;
++
++  p = calloc (n, s);
++  if (p == NULL)
++    oom_error ("calloc", n * s);
++  return p;
++}
+--- /dev/null
++++ glibc-2.19/support/xclose.c
+@@ -0,0 +1,28 @@
++/* close with error checking.
++   Copyright (C) 2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xunistd.h>
++#include <support/check.h>
++#include <errno.h>
++
++void
++xclose (int fd)
++{
++  if (close (fd) < 0 && errno != EINTR)
++    FAIL_EXIT1 ("close of descriptor %d failed: %m", fd);
++}
+--- /dev/null
++++ glibc-2.19/support/xconnect.c
+@@ -0,0 +1,30 @@
++/* connect with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xconnect (int fd, const struct sockaddr *sa, socklen_t sa_len)
++{
++  if (connect (fd, sa, sa_len) != 0)
++    FAIL_EXIT1 ("connect (%d), family %d: %m", fd, sa->sa_family);
++}
+--- /dev/null
++++ glibc-2.19/support/xgetsockname.c
+@@ -0,0 +1,30 @@
++/* getsockname with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xgetsockname (int fd, struct sockaddr *sa, socklen_t *plen)
++{
++  if (getsockname (fd, sa, plen) != 0)
++    FAIL_EXIT1 ("setsockopt (%d): %m", fd);
++}
+--- /dev/null
++++ glibc-2.19/support/xlisten.c
+@@ -0,0 +1,30 @@
++/* listen with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xlisten (int fd, int backlog)
++{
++  if (listen (fd, backlog) != 0)
++    FAIL_EXIT1 ("listen (%d, %d): %m", fd, backlog);
++}
+--- /dev/null
++++ glibc-2.19/support/xmalloc.c
+@@ -0,0 +1,34 @@
++/* Error-checking wrapper for malloc.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++void *
++xmalloc (size_t n)
++{
++  void *p;
++
++  p = malloc (n);
++  if (p == NULL)
++    oom_error ("malloc", n);
++  return p;
++}
+--- /dev/null
++++ glibc-2.19/support/xpoll.c
+@@ -0,0 +1,32 @@
++/* poll with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++int
++xpoll (struct pollfd *fds, nfds_t nfds, int timeout)
++{
++  int ret = poll (fds, nfds, timeout);
++  if (ret < 0)
++    FAIL_EXIT1 ("poll: %m");
++  return ret;
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_check_return.c
+@@ -0,0 +1,34 @@
++/* Return value checking for pthread functions, exit variant.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xpthread_check_return (const char *function, int value)
++{
++  if (value != 0)
++    {
++      errno = value;
++      FAIL_EXIT1 ("%s: %m", function);
++    }
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_create.c
+@@ -0,0 +1,29 @@
++/* pthread_create with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++pthread_t
++xpthread_create (pthread_attr_t *attr,
++                 void *(*thread_func) (void *), void *closure)
++{
++  pthread_t thr;
++  xpthread_check_return
++    ("pthread_create", pthread_create (&thr, attr, thread_func, closure));
++  return thr;
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_detach.c
+@@ -0,0 +1,25 @@
++/* pthread_detach with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++void
++xpthread_detach (pthread_t thr)
++{
++  xpthread_check_return ("pthread_detach", pthread_detach (thr));
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_join.c
+@@ -0,0 +1,27 @@
++/* pthread_join with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++void *
++xpthread_join (pthread_t thr)
++{
++  void *result;
++  xpthread_check_return ("pthread_join", pthread_join (thr, &result));
++  return result;
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_mutex_lock.c
+@@ -0,0 +1,25 @@
++/* pthread_mutex_lock with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++void
++xpthread_mutex_lock (pthread_mutex_t *mutex)
++{
++  xpthread_check_return ("pthread_mutex_lock", pthread_mutex_lock (mutex));
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_mutex_unlock.c
+@@ -0,0 +1,25 @@
++/* pthread_mutex_unlock with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++void
++xpthread_mutex_unlock (pthread_mutex_t *mutex)
++{
++  xpthread_check_return ("pthread_mutex_unlock", pthread_mutex_unlock (mutex));
++}
+--- /dev/null
++++ glibc-2.19/support/xpthread_once.c
+@@ -0,0 +1,25 @@
++/* pthread_once with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xthread.h>
++
++void
++xpthread_once (pthread_once_t *guard, void (*func) (void))
++{
++  xpthread_check_return ("pthread_once", pthread_once (guard, func));
++}
+--- /dev/null
++++ glibc-2.19/support/xrealloc.c
+@@ -0,0 +1,32 @@
++/* Error-checking wrapper for realloc.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++void *
++xrealloc (void *p, size_t n)
++{
++  void *result = realloc (p, n);
++  if (result == NULL && (n > 0 || p == NULL))
++    oom_error ("realloc", n);
++  return result;
++}
+--- /dev/null
++++ glibc-2.19/support/xrecvfrom.c
+@@ -0,0 +1,33 @@
++/* recvfrom with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++size_t
++xrecvfrom (int fd, void *buf, size_t buflen, int flags,
++           struct sockaddr *sa, socklen_t *salen)
++{
++  ssize_t ret = recvfrom (fd, buf, buflen, flags, sa, salen);
++  if (ret < 0)
++    FAIL_EXIT1 ("error: recvfrom (%d), %zu bytes buffer: %m", fd, buflen);
++  return ret;
++}
+--- /dev/null
++++ glibc-2.19/support/xsendto.c
+@@ -0,0 +1,35 @@
++/* sendto with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xsendto (int fd, const void *buf, size_t buflen, int flags,
++         const struct sockaddr *sa, socklen_t salen)
++{
++  ssize_t ret = sendto (fd, buf, buflen, flags, sa, salen);
++  if (ret < 0)
++    FAIL_EXIT1 ("sendto (%d), %zu bytes, family %d: %m",
++                fd, buflen, sa->sa_family);
++  if (ret != buflen)
++    FAIL_EXIT1 ("sendto (%d) sent %zd bytes instead of %zu", fd, ret, buflen);
++}
+--- /dev/null
++++ glibc-2.19/support/xsetsockopt.c
+@@ -0,0 +1,31 @@
++/* setsockopt with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++void
++xsetsockopt (int fd, int level, int name, const void *val, socklen_t vallen)
++{
++  if (setsockopt (fd, level, name, val, vallen) != 0)
++    FAIL_EXIT1 ("setsockopt (%d, %d, %d), %zu bytes: %m",
++                fd, level, name, (size_t) vallen);
++}
+--- /dev/null
++++ glibc-2.19/support/xsocket.c
+@@ -0,0 +1,32 @@
++/* socket with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/xsocket.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <support/check.h>
++
++int
++xsocket (int domain, int type, int protocol)
++{
++  int fd = socket (domain, type, protocol);
++  if (fd < 0)
++    FAIL_EXIT1 ("socket (%d, %d, %d): %m\n", domain, type, protocol);
++  return fd;
++}
+--- /dev/null
++++ glibc-2.19/support/xstrdup.c
+@@ -0,0 +1,30 @@
++/* strdup with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <string.h>
++
++char *
++xstrdup (const char *s)
++{
++  char *p = strdup (s);
++  if (p == NULL)
++    oom_error ("strdup", strlen (s));
++  return p;
++}
+--- glibc-2.19.orig/Makeconfig
++++ glibc-2.19/Makeconfig
+@@ -443,11 +443,11 @@
+ +link-after-libc = $(+postctor) $(+postinit)
+ +link = $(+link-before-libc) $(rtld-LDFLAGS) $(link-libc) \
+ 	$(+link-after-libc)
+-+link-tests = $(+link-before-libc) $(rtld-tests-LDFLAGS) \
+++link-tests = $(+link-before-libc) $(libsupport) $(rtld-tests-LDFLAGS) \
+ 	      $(link-libc-tests) $(+link-after-libc)
+ else
+ +link = $(+link-static)
+-+link-tests = $(+link-static-tests)
+++link-tests = $(libsupport) $(+link-static-tests)
+ endif
+ endif
+ ifeq (yes,$(build-shared))
+@@ -481,7 +481,7 @@
+ link-libc-tests = $(link-libc-tests-rpath-link) \
+ 		  $(link-libc-before-gnulib) $(gnulib-tests)
+ # This is how to find at build-time things that will be installed there.
+-rpath-dirs = math elf dlfcn nss nis rt resolv crypt
++rpath-dirs = math elf dlfcn nss nis rt resolv crypt support
+ rpath-link = \
+ $(common-objdir):$(subst $(empty) ,:,$(patsubst ../$(subdir),.,$(rpath-dirs:%=$(common-objpfx)%)))
+ else
+@@ -1034,6 +1034,12 @@
+ libm = $(common-objpfx)math/libm.a
+ endif
+ 
++ifeq ($(build-shared),yes)
++libsupport = $(common-objpfx)support/libsupport_nonshared.a
++else
++libsupport = $(common-objpfx)support/libsupport.a
++endif
++
+ # These are the subdirectories containing the library source.  The order
+ # is more or less arbitrary.  The sorting step will take care of the
+ # dependencies.
+@@ -1041,7 +1047,7 @@
+ 	      stdlib stdio-common libio malloc string wcsmbs time dirent    \
+ 	      grp pwd posix io termios resource misc socket sysvipc gmon    \
+ 	      gnulib iconv iconvdata wctype manual shadow gshadow po argp   \
+-	      crypt localedata timezone rt conform debug		    \
++	      crypt localedata timezone rt conform debug support	    \
+ 	      $(add-on-subdirs) dlfcn elf
+ 
+ ifndef avoid-generated
+--- /dev/null
++++ glibc-2.19/support/write_message.c
+@@ -0,0 +1,29 @@
++/* Write a message to standard output.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <string.h>
++#include <unistd.h>
++
++void
++write_message (const char *message)
++{
++  ssize_t unused __attribute__ ((unused));
++  unused = write (STDOUT_FILENO, message, strlen (message));
++}
+--- /dev/null
++++ glibc-2.19/support/oom_error.c
+@@ -0,0 +1,29 @@
++/* Reporting out-of-memory errors.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/support.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++
++void
++oom_error (const char *function, size_t size)
++{
++  printf ("%s: unable to allocate %zu bytes: %m\n", function, size);
++  exit (1);
++}

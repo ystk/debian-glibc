@@ -1,3 +1,34 @@
+glibc (2.19-18+deb8u11) jessie-security; urgency=medium
+
+  * Non-maintainer upload by the ELTS Team.
+  * Backport much of the test support infrastructure from 2.24.
+  * CVE-2017-12132 dns spoofing via fragmentation Closes: #870650
+  * CVE-2017-12133 clntudp_call use after free Closes: #870648
+  * CVE-2017-15670 glob buffer overflow Closes: #879501
+  * CVE-2017-15671 glob memory leak Closes: #879500
+  * CVE-2017-15804 glob buffer overflow Closes: #879955
+  * CVE-2017-16997 setuid privilege escalation involving RPATH Closes: 884615
+  * CVE-2017-1000408 ld.so amplifiable memory leak Closes: 884132
+  * CVE-2017-1000409 ld.so buffer overflow Closes: #884133
+  * CVE-2018-6485 and CVE-2018-6551 posix_memalign integer overflow
+    Closes: #878159
+  * CVE-2018-11236 32bit realpath buffer overflow Closes: #899071
+  * CVE-2018-1000001 getcwd could return a relative path Closes: #887001
+  * CVE-2019-9169 regex out of bounds read Closes: #924612
+  * CVE-2019-25013 oob read in iconv Closes: #979273
+  * CVE-2020-1752 use after free in glob Closes: #953788
+  * CVE-2020-10029 sinl buffer overflow Closes: #953108
+  * CVE-2020-27618 iconv infinite loop Closes: #973914
+  * CVE-2020-29573 printf buffer overflow for non-canonical nans
+  * CVE-2021-3326 iconv abort Closes: #981198
+  * CVE-2021-3999 oob write for getcwd size 1
+  * CVE-2021-33574 mq_notify use after free Closes: #989147
+  * CVE-2021-35942 wordexp input validation Closes: #990542
+  * CVE-2022-23218 svcunix_create buffer overflow
+  * CVE-2022-23219 clnt_create buffer overflow
+
+ -- Helmut Grohne <helmut@subdivi.de>  Wed, 12 Oct 2022 08:24:17 +0200
+
 glibc (2.19-18+deb8u10) jessie-security; urgency=medium
 
   * debian/patches/any/local-CVE-2017-1000366-rtld-LD_AUDIT.diff,
