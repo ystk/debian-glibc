@@ -1,3 +1,10 @@
+glibc (2.19-18+deb8u12) jessie-security; urgency=medium
+
+  * Non-maintainer upload by the ELTS Team.
+  * BZ18036 denial of service in fnmatch, similar to CVE-2015-8984
+
+ -- Helmut Grohne <helmut@subdivi.de>  Tue, 20 Jun 2023 11:51:16 +0200
+
 glibc (2.19-18+deb8u11) jessie-security; urgency=medium
 
   * Non-maintainer upload by the ELTS Team.

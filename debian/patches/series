@@ -303,3 +303,4 @@ all/git-CVE-2021-33574-mq_notify-use-after-free.diff
 all/git-CVE-2021-35942-wordexp-handle-overflow-in-positional-parameter-numb.diff
 all/git-CVE-2022-23218-Buffer-overflow-in-sunrpc-svcunix_cre.diff
 all/git-CVE-2022-23219-Buffer-overflow-in-sunrpc-clnt_create.diff
+bz18036.patch

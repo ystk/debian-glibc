@@ -1,0 +1,85 @@
+From c2c6d39fab901c97c18fa3a3a3658d9dc3f7df61 Mon Sep 17 00:00:00 2001
+From: Paul Pluzhnikov <ppluzhnikov@google.com>
+Date: Mon, 2 Mar 2015 13:34:22 -0800
+Subject: [PATCH] Fix BZ 18036 buffer overflow (read past end of buffer) in
+ internal_fnmatch
+
+---
+ ChangeLog            |  6 ++++++
+ NEWS                 |  4 ++--
+ posix/fnmatch_loop.c |  7 ++++++-
+ posix/tst-fnmatch3.c | 22 +++++++++++++++++++++-
+ 4 files changed, 35 insertions(+), 4 deletions(-)
+
+Backport:
+ * Drop Changelog entry:
+	[BZ #18036]
+	* posix/fnmatch_loop.c (END): Detect invalid pattern.
+	* posix/tst-fnmatch3.c (do_bz18036): Add test case.
+ * Drop NEWS entry
+
+diff --git a/posix/fnmatch_loop.c b/posix/fnmatch_loop.c
+index 72c5d8f041..f46c9dfedb 100644
+--- a/posix/fnmatch_loop.c
++++ b/posix/fnmatch_loop.c
+@@ -1036,7 +1036,12 @@ END (const CHAR *pattern)
+       }
+     else if ((*p == L('?') || *p == L('*') || *p == L('+') || *p == L('@')
+ 	      || *p == L('!')) && p[1] == L('('))
+-      p = END (p + 1);
++      {
++	p = END (p + 1);
++	if (*p == L('\0'))
++	  /* This is an invalid pattern.  */
++	  return pattern;
++      }
+     else if (*p == L(')'))
+       break;
+ 
+diff --git a/posix/tst-fnmatch3.c b/posix/tst-fnmatch3.c
+index 75bc00a2c5..fdf99342e9 100644
+--- a/posix/tst-fnmatch3.c
++++ b/posix/tst-fnmatch3.c
+@@ -17,6 +17,26 @@
+    <http://www.gnu.org/licenses/>.  */
+ 
+ #include <fnmatch.h>
++#include <sys/mman.h>
++#include <string.h>
++#include <unistd.h>
++
++int
++do_bz18036 (void)
++{
++  const char p[] = "**(!()";
++  const int pagesize = getpagesize ();
++
++  char *pattern = mmap (0, 2 * pagesize, PROT_READ|PROT_WRITE,
++                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
++  if (pattern == MAP_FAILED) return 1;
++
++  mprotect (pattern + pagesize, pagesize, PROT_NONE);
++  memset (pattern, ' ', pagesize);
++  strcpy (pattern, p);
++
++  return fnmatch (pattern, p, FNM_EXTMATCH);
++}
+ 
+ int
+ do_test (void)
+@@ -22,8 +31,11 @@ do_test (void)
+ do_test (void)
+ {
+   const char *pattern = "[[:alpha:]'[:alpha:]\0]";
++
++  if (fnmatch ("[a[.\0.]]", "a", 0) != FNM_NOMATCH)
++    return 1;
+
+-  return fnmatch (pattern, "a", 0) != FNM_NOMATCH;
++  return do_bz18036 ();
+ }
+ 
+ #define TEST_FUNCTION do_test ()
+-- 
+2.39.3
+
