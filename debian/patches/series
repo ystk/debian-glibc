@@ -304,3 +304,8 @@ all/git-CVE-2021-35942-wordexp-handle-overflow-in-positional-parameter-numb.diff
 all/git-CVE-2022-23218-Buffer-overflow-in-sunrpc-svcunix_cre.diff
 all/git-CVE-2022-23219-Buffer-overflow-in-sunrpc-clnt_create.diff
 bz18036.patch
+
+all/git-0001-support-Add-TEST_COMPARE-macro.patch
+all/git-0002-Add-support-xm-un-map.c.patch
+all/git-0003-Add-support-xmprotect.c.patch
+all/git-0004-iconv-ISO-2022-CN-EXT-fix-out-of-bound-writes-when-w.patch

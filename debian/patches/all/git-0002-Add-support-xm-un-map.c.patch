@@ -1,0 +1,100 @@
+From 3f9594589748a264a1e372590dcb354b0eb7f774 Mon Sep 17 00:00:00 2001
+From: Florian Weimer <fweimer@redhat.com>
+Date: Fri, 27 Jan 2017 06:53:19 +0100
+Subject: Add support/xm{,un}map.c
+
+---
+ support/Makefile  |  2 ++
+ support/xmmap.c   | 31 +++++++++++++++++++++++++++++++
+ support/xmunmap.c | 28 ++++++++++++++++++++++++++++
+ 3 files changed, 61 insertions(+)
+ create mode 100644 support/xmmap.c
+ create mode 100644 support/xmunmap.c
+
+diff --git a/support/Makefile b/support/Makefile
+index 65f83f0a7f..46c4814a49 100644
+--- a/support/Makefile
++++ b/support/Makefile
+@@ -43,6 +43,8 @@ libsupport-routines = \
+   xgetsockname \
+   xlisten \
+   xmalloc \
++  xmmap \
++  xmunmap \
+   xpoll \
+   xpthread_check_return \
+   xpthread_create \
+diff --git a/support/xmmap.c b/support/xmmap.c
+new file mode 100644
+index 0000000000..435b1eb733
+--- /dev/null
++++ b/support/xmmap.c
+@@ -0,0 +1,31 @@
++/* mmap with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/check.h>
++#include <support/xunistd.h>
++#include <sys/mman.h>
++
++void *
++xmmap (void *addr, size_t length, int prot, int flags, int fd)
++{
++  void *result = mmap (addr, length, prot, flags, fd, 0);
++  if (result == MAP_FAILED)
++    FAIL_EXIT1 ("mmap of %zu bytes, prot=0x%x, flags=0x%x: %m",
++                length, prot, flags);
++  return result;
++}
+diff --git a/support/xmunmap.c b/support/xmunmap.c
+new file mode 100644
+index 0000000000..6ef5a4a468
+--- /dev/null
++++ b/support/xmunmap.c
+@@ -0,0 +1,28 @@
++/* munmap with error checking.
++   Copyright (C) 2016-2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/check.h>
++#include <support/xunistd.h>
++#include <sys/mman.h>
++
++void
++xmunmap (void *addr, size_t length)
++{
++  if (munmap (addr, length) != 0)
++    FAIL_EXIT1 ("munmap of %zu bytes: %m", length);
++}
+-- 
+2.30.2
+

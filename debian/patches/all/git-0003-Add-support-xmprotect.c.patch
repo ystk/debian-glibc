@@ -1,0 +1,74 @@
+From b409ab9483b28ef2b73259d8ecc9e5cc011d1183 Mon Sep 17 00:00:00 2001
+From: Florian Weimer <fweimer@redhat.com>
+Date: Wed, 21 Jun 2017 13:09:08 +0200
+Subject: Add support/xmprotect.c
+
+---
+ support/Makefile    |  1 +
+ support/xmprotect.c | 28 ++++++++++++++++++++++++++++
+ support/xunistd.h   |  2 +-
+ 3 files changed, 30 insertions(+), 1 deletion(-)
+ create mode 100644 support/xmprotect.c
+
+diff --git a/support/Makefile b/support/Makefile
+index 46c4814a49..8f54369048 100644
+--- a/support/Makefile
++++ b/support/Makefile
+@@ -44,6 +44,7 @@ libsupport-routines = \
+   xlisten \
+   xmalloc \
+   xmmap \
++  xmprotect \
+   xmunmap \
+   xpoll \
+   xpthread_check_return \
+diff --git a/support/xmprotect.c b/support/xmprotect.c
+new file mode 100644
+index 0000000000..9410251c32
+--- /dev/null
++++ b/support/xmprotect.c
+@@ -0,0 +1,28 @@
++/* mprotect with error checking.
++   Copyright (C) 2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <support/check.h>
++#include <support/xunistd.h>
++#include <sys/mman.h>
++
++void
++xmprotect (void *addr, size_t length, int prot)
++{
++  if (mprotect (addr, length, prot) != 0)
++    FAIL_EXIT1 ("mprotect (%p, %zu, 0x%x): %m", addr, length, prot);
++}
+diff --git a/support/xunistd.h b/support/xunistd.h
+index 151d743e1f..c947bfd8fb 100644
+--- a/support/xunistd.h
++++ b/support/xunistd.h
+@@ -48,7 +48,7 @@ void xwrite (int, const void *, size_t);
+ 
+ /* Invoke mmap with a zero file offset.  */
+ void *xmmap (void *addr, size_t length, int prot, int flags, int fd);
+-
++void xmprotect (void *addr, size_t length, int prot);
+ void xmunmap (void *addr, size_t length);
+ 
+ __END_DECLS
+-- 
+2.30.2
+

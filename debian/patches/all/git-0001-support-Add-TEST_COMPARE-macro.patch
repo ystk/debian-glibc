@@ -1,0 +1,160 @@
+From ebe23e1e7b501867a721233a706a5c847640c445 Mon Sep 17 00:00:00 2001
+From: Florian Weimer <fweimer@redhat.com>
+Date: Mon, 4 Dec 2017 20:54:24 +0100
+Subject: support: Add TEST_COMPARE macro
+
+---
+ support/Makefile                       |  1 +
+ support/check.h                        | 61 ++++++++++++++++++++++++++
+ support/support_test_compare_failure.c | 55 +++++++++++++++++++++++
+ 3 files changed, 117 insertions(+)
+ create mode 100644 support/support_test_compare_failure.c
+
+diff --git a/support/Makefile b/support/Makefile
+index 40ee41a8be..65f83f0a7f 100644
+--- a/support/Makefile
++++ b/support/Makefile
+@@ -29,6 +29,7 @@ libsupport-routines = \
+   oom_error \
+   resolv_test \
+   support_record_failure \
++  support_test_compare_failure \
+   support_test_main \
+   support_test_verify_impl \
+   temp_file \
+diff --git a/support/check.h b/support/check.h
+index 1d244a3557..df5b4aa6d6 100644
+--- a/support/check.h
++++ b/support/check.h
+@@ -82,6 +82,67 @@ void support_test_verify_impl (int status, const char *file, int line,
+    does not support reporting failures from a DSO.  */
+ void support_record_failure (void);
+ 
++/* Compare the two integers LEFT and RIGHT and report failure if they
++   are different.  */
++#define TEST_COMPARE(left, right)                                       \
++  ({                                                                    \
++    /* + applies the integer promotions, for bitfield support.   */     \
++    typedef __typeof__ (+ (left)) __left_type;                          \
++    typedef __typeof__ (+ (right)) __right_type;                        \
++    __left_type __left_value = (left);                                  \
++    __right_type __right_value = (right);                               \
++    /* Prevent use with floating-point and boolean types.  */           \
++    _Static_assert ((__left_type) 1.0 == (__left_type) 1.5,             \
++                    "left value has floating-point type");              \
++    _Static_assert ((__right_type) 1.0 == (__right_type) 1.5,           \
++                    "right value has floating-point type");             \
++    /* Prevent accidental use with larger-than-long long types.  */     \
++    _Static_assert (sizeof (__left_value) <= sizeof (long long),        \
++                    "left value fits into long long");                  \
++    _Static_assert (sizeof (__right_value) <= sizeof (long long),       \
++                    "right value fits into long long");                 \
++    /* Make sure that integer conversions does not alter the sign.   */ \
++    enum                                                                \
++    {                                                                   \
++      __left_is_unsigned = (__left_type) -1 > 0,                        \
++      __right_is_unsigned = (__right_type) -1 > 0,                      \
++      __unsigned_left_converts_to_wider = (__left_is_unsigned           \
++                                           && (sizeof (__left_value)    \
++                                               < sizeof (__right_value))), \
++      __unsigned_right_converts_to_wider = (__right_is_unsigned         \
++                                            && (sizeof (__right_value)  \
++                                                < sizeof (__left_value))) \
++    };                                                                  \
++    _Static_assert (__left_is_unsigned == __right_is_unsigned           \
++                    || __unsigned_left_converts_to_wider                \
++                    || __unsigned_right_converts_to_wider,              \
++                    "integer conversions may alter sign of operands");  \
++    /* Compare the value.  */                                           \
++    if (__left_value != __right_value)                                  \
++      /* Pass the sign for printing the correct value.  */              \
++      support_test_compare_failure                                      \
++        (__FILE__, __LINE__,                                            \
++         #left, __left_value, __left_value < 0, sizeof (__left_type),   \
++         #right, __right_value, __right_value < 0, sizeof (__right_type)); \
++  })
++
++/* Internal implementation of TEST_COMPARE.  LEFT_NEGATIVE and
++   RIGHT_NEGATIVE are used to store the sign separately, so that both
++   unsigned long long and long long arguments fit into LEFT_VALUE and
++   RIGHT_VALUE, and the function can still print the original value.
++   LEFT_SIZE and RIGHT_SIZE specify the size of the argument in bytes,
++   for hexadecimal formatting.  */
++void support_test_compare_failure (const char *file, int line,
++                                   const char *left_expr,
++                                   long long left_value,
++                                   int left_negative,
++                                   int left_size,
++                                   const char *right_expr,
++                                   long long right_value,
++                                   int right_negative,
++                                   int right_size);
++
++
+ /* Internal function called by the test driver.  */
+ int support_report_failure (int status)
+   __attribute__ ((weak, warn_unused_result));
+diff --git a/support/support_test_compare_failure.c b/support/support_test_compare_failure.c
+new file mode 100644
+index 0000000000..894145b56d
+--- /dev/null
++++ b/support/support_test_compare_failure.c
+@@ -0,0 +1,55 @@
++/* Reporting a numeric comparison failure.
++   Copyright (C) 2017 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <stdio.h>
++#include <support/check.h>
++
++static void
++report (const char *which, const char *expr, long long value, int negative,
++        int size)
++{
++  printf ("  %s: ", which);
++  if (negative)
++    printf ("%lld", value);
++  else
++    printf ("%llu", (unsigned long long) value);
++  unsigned long long mask
++    = (~0ULL) >> (8 * (sizeof (unsigned long long) - size));
++  printf (" (0x%llx); from: %s\n", (unsigned long long) value & mask, expr);
++}
++
++void
++support_test_compare_failure (const char *file, int line,
++                              const char *left_expr,
++                              long long left_value,
++                              int left_negative,
++                              int left_size,
++                              const char *right_expr,
++                              long long right_value,
++                              int right_negative,
++                              int right_size)
++{
++  support_record_failure ();
++  if (left_size != right_size)
++    printf ("%s:%d: numeric comparison failure (widths %d and %d)\n",
++            file, line, left_size * 8, right_size * 8);
++  else
++    printf ("%s:%d: numeric comparison failure\n", file, line);
++  report (" left", left_expr, left_value, left_negative, left_size);
++  report ("right", right_expr, right_value, right_negative, right_size);
++}
+-- 
+2.30.2
+
