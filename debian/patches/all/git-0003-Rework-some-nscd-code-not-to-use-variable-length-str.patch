@@ -1,0 +1,311 @@
+From 0308139a3806d0766982559539f597cc23e3a6cf Mon Sep 17 00:00:00 2001
+From: Roland McGrath <roland@hack.frob.com>
+Date: Wed, 22 Oct 2014 13:17:20 -0700
+Subject: Rework some nscd code not to use variable-length struct types.
+
+---
+ inet/netgroup.h      |   2 +-
+ nscd/netgroupcache.c |  14 ++--
+ nscd/nscd.c          | 164 +++++++++++++++++++++++--------------------
+ nscd/nscd_helper.c   |  17 ++---
+ 4 files changed, 104 insertions(+), 93 deletions(-)
+
+diff --git a/inet/netgroup.h b/inet/netgroup.h
+index 490004589d..f772a09d82 100644
+--- a/inet/netgroup.h
++++ b/inet/netgroup.h
+@@ -26,7 +26,7 @@
+ struct name_list
+ {
+   struct name_list *next;
+-  char name[0];
++  char name[];
+ };
+ 
+ 
+diff --git a/nscd/netgroupcache.c b/nscd/netgroupcache.c
+index dc41aa1ebb..f15685b579 100644
+--- a/nscd/netgroupcache.c
++++ b/nscd/netgroupcache.c
+@@ -21,6 +21,7 @@
+ #include <errno.h>
+ #include <libintl.h>
+ #include <stdbool.h>
++#include <stdlib.h>
+ #include <unistd.h>
+ #include <sys/mman.h>
+ 
+@@ -136,11 +137,8 @@ addgetnetgrentX (struct database_dyn *db, int fd, request_header *req,
+   char *buffer = NULL;
+   size_t nentries = 0;
+   size_t group_len = strlen (key) + 1;
+-  union
+-  {
+-    struct name_list elem;
+-    char mem[sizeof (struct name_list) + group_len];
+-  } first_needed;
++  struct name_list *first_needed
++    = alloca (sizeof (struct name_list) + group_len);
+ 
+   if (netgroup_database == NULL
+       && __nss_database_lookup ("netgroup", NULL, NULL, &netgroup_database))
+@@ -153,9 +151,9 @@ addgetnetgrentX (struct database_dyn *db, int fd, request_header *req,
+ 
+   memset (&data, '\0', sizeof (data));
+   buffer = xmalloc (buflen);
+-  first_needed.elem.next = &first_needed.elem;
+-  memcpy (first_needed.elem.name, key, group_len);
+-  data.needed_groups = &first_needed.elem;
++  first_needed->next = first_needed;
++  memcpy (first_needed->name, key, group_len);
++  data.needed_groups = first_needed;
+ 
+   while (data.needed_groups != NULL)
+     {
+diff --git a/nscd/nscd.c b/nscd/nscd.c
+index 63d9d83599..4208ca7962 100644
+--- a/nscd/nscd.c
++++ b/nscd/nscd.c
+@@ -315,6 +315,75 @@ main (int argc, char **argv)
+ }
+ 
+ 
++static void __attribute__ ((noreturn))
++invalidate_db (const char *dbname)
++{
++  int sock = nscd_open_socket ();
++
++  if (sock == -1)
++    exit (EXIT_FAILURE);
++
++  size_t dbname_len = strlen (dbname) + 1;
++  size_t reqlen = sizeof (request_header) + dbname_len;
++  struct
++  {
++    request_header req;
++    char dbname[];
++  } *reqdata = alloca (reqlen);
++
++  reqdata->req.key_len = dbname_len;
++  reqdata->req.version = NSCD_VERSION;
++  reqdata->req.type = INVALIDATE;
++  memcpy (reqdata->dbname, dbname, dbname_len);
++
++  ssize_t nbytes = TEMP_FAILURE_RETRY (send (sock, reqdata, reqlen,
++					     MSG_NOSIGNAL));
++
++  if (nbytes != reqlen)
++    {
++      int err = errno;
++      close (sock);
++      error (EXIT_FAILURE, err, _("write incomplete"));
++    }
++
++  /* Wait for ack.  Older nscd just closed the socket when
++     prune_cache finished, silently ignore that.  */
++  int32_t resp = 0;
++  nbytes = TEMP_FAILURE_RETRY (read (sock, &resp, sizeof (resp)));
++  if (nbytes != 0 && nbytes != sizeof (resp))
++    {
++      int err = errno;
++      close (sock);
++      error (EXIT_FAILURE, err, _("cannot read invalidate ACK"));
++    }
++
++  close (sock);
++
++  if (resp != 0)
++    error (EXIT_FAILURE, resp, _("invalidation failed"));
++
++  exit (0);
++}
++
++static void __attribute__ ((noreturn))
++send_shutdown (void)
++{
++  int sock = nscd_open_socket ();
++
++  if (sock == -1)
++    exit (EXIT_FAILURE);
++
++  request_header req;
++  req.version = NSCD_VERSION;
++  req.type = SHUTDOWN;
++  req.key_len = 0;
++
++  ssize_t nbytes = TEMP_FAILURE_RETRY (send (sock, &req, sizeof req,
++                                             MSG_NOSIGNAL));
++  close (sock);
++  exit (nbytes != sizeof (request_header) ? EXIT_FAILURE : EXIT_SUCCESS);
++}
++
+ /* Handle program arguments.  */
+ static error_t
+ parse_opt (int key, char *arg, struct argp_state *state)
+@@ -337,91 +406,34 @@ parse_opt (int key, char *arg, struct argp_state *state)
+     case 'K':
+       if (getuid () != 0)
+ 	error (4, 0, _("Only root is allowed to use this option!"));
+-      {
+-	int sock = nscd_open_socket ();
+-
+-	if (sock == -1)
+-	  exit (EXIT_FAILURE);
+-
+-	request_header req;
+-	req.version = NSCD_VERSION;
+-	req.type = SHUTDOWN;
+-	req.key_len = 0;
+-
+-	ssize_t nbytes = TEMP_FAILURE_RETRY (send (sock, &req,
+-						   sizeof (request_header),
+-						   MSG_NOSIGNAL));
+-	close (sock);
+-	exit (nbytes != sizeof (request_header) ? EXIT_FAILURE : EXIT_SUCCESS);
+-      }
++      else
++        send_shutdown ();
++      break;
+ 
+     case 'g':
+       get_stats = true;
+       break;
+ 
+     case 'i':
++      {
++        /* Validate the database name.  */
++
++        dbtype cnt;
++        for (cnt = pwddb; cnt < lastdb; ++cnt)
++          if (strcmp (arg, dbnames[cnt]) == 0)
++            break;
++
++        if (cnt == lastdb)
++          {
++            argp_error (state, _("'%s' is not a known database"), arg);
++            return EINVAL;
++          }
++      }
+       if (getuid () != 0)
+ 	error (4, 0, _("Only root is allowed to use this option!"));
+       else
+-	{
+-	  int sock = nscd_open_socket ();
+-
+-	  if (sock == -1)
+-	    exit (EXIT_FAILURE);
+-
+-	  dbtype cnt;
+-	  for (cnt = pwddb; cnt < lastdb; ++cnt)
+-	    if (strcmp (arg, dbnames[cnt]) == 0)
+-	      break;
+-
+-	  if (cnt == lastdb)
+-	    {
+-	      argp_error (state, _("'%s' is not a known database"), arg);
+-	      return EINVAL;
+-	    }
+-
+-	  size_t arg_len = strlen (arg) + 1;
+-	  struct
+-	  {
+-	    request_header req;
+-	    char arg[arg_len];
+-	  } reqdata;
+-
+-	  reqdata.req.key_len = strlen (arg) + 1;
+-	  reqdata.req.version = NSCD_VERSION;
+-	  reqdata.req.type = INVALIDATE;
+-	  memcpy (reqdata.arg, arg, arg_len);
+-
+-	  ssize_t nbytes = TEMP_FAILURE_RETRY (send (sock, &reqdata,
+-						     sizeof (request_header)
+-						     + arg_len,
+-						     MSG_NOSIGNAL));
+-
+-	  if (nbytes != sizeof (request_header) + arg_len)
+-	    {
+-	      int err = errno;
+-	      close (sock);
+-	      error (EXIT_FAILURE, err, _("write incomplete"));
+-	    }
+-
+-	  /* Wait for ack.  Older nscd just closed the socket when
+-	     prune_cache finished, silently ignore that.  */
+-	  int32_t resp = 0;
+-	  nbytes = TEMP_FAILURE_RETRY (read (sock, &resp, sizeof (resp)));
+-	  if (nbytes != 0 && nbytes != sizeof (resp))
+-	    {
+-	      int err = errno;
+-	      close (sock);
+-	      error (EXIT_FAILURE, err, _("cannot read invalidate ACK"));
+-	    }
+-
+-	  close (sock);
+-
+-	  if (resp != 0)
+-	    error (EXIT_FAILURE, resp, _("invalidation failed"));
+-
+-	  exit (0);
+-	}
++        invalidate_db (arg);
++      break;
+ 
+     case 't':
+       nthreads = atol (arg);
+diff --git a/nscd/nscd_helper.c b/nscd/nscd_helper.c
+index e4fb2e59f8..1405b1511c 100644
+--- a/nscd/nscd_helper.c
++++ b/nscd/nscd_helper.c
+@@ -21,6 +21,7 @@
+ #include <fcntl.h>
+ #include <stdbool.h>
+ #include <stddef.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
+ #include <unistd.h>
+@@ -186,12 +187,12 @@ open_socket (request_type type, const char *key, size_t keylen)
+   if (sock < 0)
+     return -1;
+ 
++  size_t real_sizeof_reqdata = sizeof (request_header) + keylen;
+   struct
+   {
+     request_header req;
+-    char key[keylen];
+-  } reqdata;
+-  size_t real_sizeof_reqdata = sizeof (request_header) + keylen;
++    char key[];
++  } *reqdata = alloca (real_sizeof_reqdata);
+ 
+ #ifndef __ASSUME_SOCK_CLOEXEC
+ # ifdef SOCK_NONBLOCK
+@@ -208,11 +209,11 @@ open_socket (request_type type, const char *key, size_t keylen)
+       && errno != EINPROGRESS)
+     goto out;
+ 
+-  reqdata.req.version = NSCD_VERSION;
+-  reqdata.req.type = type;
+-  reqdata.req.key_len = keylen;
++  reqdata->req.version = NSCD_VERSION;
++  reqdata->req.type = type;
++  reqdata->req.key_len = keylen;
+ 
+-  memcpy (reqdata.key, key, keylen);
++  memcpy (reqdata->key, key, keylen);
+ 
+   bool first_try = true;
+   struct timeval tvend;
+@@ -223,7 +224,7 @@ open_socket (request_type type, const char *key, size_t keylen)
+ #ifndef MSG_NOSIGNAL
+ # define MSG_NOSIGNAL 0
+ #endif
+-      ssize_t wres = TEMP_FAILURE_RETRY (__send (sock, &reqdata,
++      ssize_t wres = TEMP_FAILURE_RETRY (__send (sock, reqdata,
+ 						 real_sizeof_reqdata,
+ 						 MSG_NOSIGNAL));
+       if (__builtin_expect (wres == (ssize_t) real_sizeof_reqdata, 1))
+-- 
+2.30.2
+

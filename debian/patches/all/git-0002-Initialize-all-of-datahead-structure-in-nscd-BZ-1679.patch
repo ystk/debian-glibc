@@ -1,0 +1,70 @@
+From c87d8ea2476e67634c066d034d9dcade0b7f1680 Mon Sep 17 00:00:00 2001
+From: Siddhesh Poyarekar <siddhesh@redhat.com>
+Date: Wed, 30 Apr 2014 12:00:39 +0530
+Subject: Initialize all of datahead structure in nscd (BZ #16791)
+
+The datahead structure has an unused padding field that remains
+uninitialized.  Valgrind prints out a warning for it on querying a
+netgroups entry.  This is harmless, but is a potential data leak since
+it would result in writing out an uninitialized byte to the cache
+file.  Besides, this happens only when there is a cache miss, so we're
+not adding computation to any fast path.
+---
+ nscd/nscd-client.h | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/nscd/nscd-client.h b/nscd/nscd-client.h
+index 28edae061a..610c88d037 100644
+--- a/nscd/nscd-client.h
++++ b/nscd/nscd-client.h
+@@ -240,12 +240,17 @@ static inline time_t
+ datahead_init_common (struct datahead *head, nscd_ssize_t allocsize,
+ 		      nscd_ssize_t recsize, uint32_t ttl)
+ {
++  /* Initialize so that we don't write out junk in uninitialized data to the
++     cache.  */
++  memset (head, 0, sizeof (*head));
++
+   head->allocsize = allocsize;
+   head->recsize = recsize;
+   head->usable = true;
+ 
+   head->ttl = ttl;
+-  /* Compute the timeout time.  */
++
++  /* Compute and return the timeout time.  */
+   return head->timeout = time (NULL) + ttl;
+ }
+ 
+@@ -253,18 +258,25 @@ static inline time_t
+ datahead_init_pos (struct datahead *head, nscd_ssize_t allocsize,
+ 		   nscd_ssize_t recsize, uint8_t nreloads, uint32_t ttl)
+ {
++  time_t ret = datahead_init_common (head, allocsize, recsize, ttl);
++
+   head->notfound = false;
+   head->nreloads = nreloads;
+-  return datahead_init_common (head, allocsize, recsize, ttl);
++
++  return ret;
+ }
+ 
+ static inline time_t
+ datahead_init_neg (struct datahead *head, nscd_ssize_t allocsize,
+ 		   nscd_ssize_t recsize, uint32_t ttl)
+ {
++  time_t ret = datahead_init_common (head, allocsize, recsize, ttl);
++
++  /* We don't need to touch nreloads here since it is set to our desired value
++     (0) when we clear the structure.  */
+   head->notfound = true;
+-  head->nreloads = 0;
+-  return datahead_init_common (head, allocsize, recsize, ttl);
++
++  return ret;
+ }
+ 
+ /* Structure for one hash table entry.  */
+-- 
+2.30.2
+

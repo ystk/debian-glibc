@@ -1,0 +1,577 @@
+From 10084a3785b57b3f6c0754a49dc93453001d863b Mon Sep 17 00:00:00 2001
+From: Adhemerval Zanella <adhemerval.zanella@linaro.org>
+Date: Wed, 16 May 2018 10:51:15 -0300
+Subject: Fix concurrent changes on nscd aware files (BZ #23178)
+
+As indicated by BZ#23178, concurrent access on some files read by nscd
+may result non expected data send through service requisition.  This is
+due 'sendfile' Linux implementation where for sockets with zero-copy
+support, callers must ensure the transferred portions of the the file
+reffered by input file descriptor remain unmodified until the reader
+on the other end of socket has consumed the transferred data.
+
+I could not find any explicit documentation stating this behaviour on
+Linux kernel documentation.  However man-pages sendfile entry [1] states
+in NOTES the aforementioned remark.  It was initially pushed on man-pages
+with an explicit testcase [2] that shows changing the file used in
+'sendfile' call prior the socket input data consumption results in
+previous data being lost.
+
+From commit message it stated on tested Linux version (3.15) only TCP
+socket showed this issues, however on recent kernels (4.4) I noticed the
+same behaviour for local sockets as well.
+
+Since sendfile on HURD is a read/write operation and the underlying
+issue on Linux, the straightforward fix is just remove sendfile use
+altogether.  I am really skeptical it is hitting some hotstop (there
+are indication over internet that sendfile is helpfull only for large
+files, more than 10kb) here to justify that extra code complexity or
+to pursuit other possible fix (through memory or file locks for
+instance, which I am not sure it is doable).
+
+Checked on x86_64-linux-gnu.
+
+	[BZ #23178]
+	* nscd/nscd-client.h (sendfileall): Remove prototype.
+	* nscd/connections.c [HAVE_SENDFILE] (sendfileall): Remove function.
+	(handle_request): Use writeall instead of sendfileall.
+	* nscd/aicache.c (addhstaiX): Likewise.
+	* nscd/grpcache.c (cache_addgr): Likewise.
+	* nscd/hstcache.c (cache_addhst): Likewise.
+	* nscd/initgrcache.c (addinitgroupsX): Likewise.
+	* nscd/netgroupcache.c (addgetnetgrentX, addinnetgrX): Likewise.
+	* nscd/pwdcache.c (cache_addpw): Likewise.
+	* nscd/servicescache.c (cache_addserv): Likewise.
+	* sysdeps/unix/sysv/linux/Makefile [$(subdir) == nscd]
+	(sysdep-CFLAGS): Remove -DHAVE_SENDFILE.
+	* sysdeps/unix/sysv/linux/kernel-features.h (__ASSUME_SENDFILE):
+	Remove define.
+
+[1] http://man7.org/linux/man-pages/man2/sendfile.2.html
+[2] https://github.com/mkerrisk/man-pages/commit/7b6a3299776b5c1c4f169a591434a855d50c68b4#diff-efd6af3a70f0f07c578e85b51e83b3c3
+---
+ nscd/aicache.c                            | 30 +-----------
+ nscd/connections.c                        | 54 +--------------------
+ nscd/grpcache.c                           | 37 ++------------
+ nscd/hstcache.c                           | 37 ++------------
+ nscd/initgrcache.c                        | 37 ++------------
+ nscd/netgroupcache.c                      | 59 ++---------------------
+ nscd/nscd-client.h                        |  2 -
+ nscd/pwdcache.c                           | 37 ++------------
+ nscd/servicescache.c                      | 34 ++-----------
+ sysdeps/unix/sysv/linux/Makefile          |  2 +-
+ sysdeps/unix/sysv/linux/kernel-features.h |  3 --
+ 11 files changed, 22 insertions(+), 310 deletions(-)
+
+diff --git a/nscd/aicache.c b/nscd/aicache.c
+index b3c0b66e3a..48c9462e5f 100644
+--- a/nscd/aicache.c
++++ b/nscd/aicache.c
+@@ -29,9 +29,6 @@
+ 
+ #include "dbg_log.h"
+ #include "nscd.h"
+-#ifdef HAVE_SENDFILE
+-# include <kernel-features.h>
+-#endif
+ 
+ 
+ typedef enum nss_status (*nss_gethostbyname4_r)
+@@ -449,32 +446,7 @@ addhstaiX (struct database_dyn *db, int fd, request_header *req,
+ 	     would unnecessarily let the receiver wait.  */
+ 	  assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1) && !alloca_used)
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) &dataset->resp > (char *) db->data);
+-	      assert ((char *) dataset - (char *) db->head + total
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-# ifndef __ASSUME_SENDFILE
+-	      ssize_t written;
+-	      written =
+-# endif
+-		sendfileall (fd, db->wr_fd, (char *) &dataset->resp
+-			     - (char *) db->head, dataset->head.recsize);
+-# ifndef __ASSUME_SENDFILE
+-	      if (written == -1 && errno == ENOSYS)
+-		goto use_write;
+-# endif
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    writeall (fd, &dataset->resp, dataset->head.recsize);
++	  writeall (fd, &dataset->resp, dataset->head.recsize);
+ 	}
+ 
+       goto out;
+diff --git a/nscd/connections.c b/nscd/connections.c
+index 55d795cef5..4598803d53 100644
+--- a/nscd/connections.c
++++ b/nscd/connections.c
+@@ -46,9 +46,6 @@
+ #include <sys/mman.h>
+ #include <sys/param.h>
+ #include <sys/poll.h>
+-#ifdef HAVE_SENDFILE
+-# include <sys/sendfile.h>
+-#endif
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/un.h>
+@@ -287,26 +284,6 @@ writeall (int fd, const void *buf, size_t len)
+ }
+ 
+ 
+-#ifdef HAVE_SENDFILE
+-ssize_t
+-sendfileall (int tofd, int fromfd, off_t off, size_t len)
+-{
+-  ssize_t n = len;
+-  ssize_t ret;
+-
+-  do
+-    {
+-      ret = TEMP_FAILURE_RETRY (sendfile (tofd, fromfd, &off, n));
+-      if (ret <= 0)
+-	break;
+-      n -= ret;
+-    }
+-  while (n > 0);
+-  return ret < 0 ? ret : len - n;
+-}
+-#endif
+-
+-
+ enum usekey
+   {
+     use_not = 0,
+@@ -1233,35 +1210,8 @@ request from '%s' [%ld] not handled due to missing permission"),
+       if (cached != NULL)
+ 	{
+ 	  /* Hurray it's in the cache.  */
+-	  ssize_t nwritten;
+-
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1))
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) cached->data > (char *) db->data);
+-	      assert ((char *) cached->data - (char *) db->head
+-		      + cached->recsize
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-	      nwritten = sendfileall (fd, db->wr_fd,
+-				      (char *) cached->data
+-				      - (char *) db->head, cached->recsize);
+-# ifndef __ASSUME_SENDFILE
+-	      if (nwritten == -1 && errno == ENOSYS)
+-		goto use_write;
+-# endif
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    nwritten = writeall (fd, cached->data, cached->recsize);
+-
+-	  if (nwritten != cached->recsize
+-	      && __builtin_expect (debug_level, 0) > 0)
++	  if (writeall (fd, cached->data, cached->recsize) != cached->recsize
++	      && __glibc_unlikely (debug_level > 0))
+ 	    {
+ 	      /* We have problems sending the result.  */
+ 	      char buf[256];
+diff --git a/nscd/grpcache.c b/nscd/grpcache.c
+index 5d4745c3cb..c06ecd9ba7 100644
+--- a/nscd/grpcache.c
++++ b/nscd/grpcache.c
+@@ -35,9 +35,6 @@
+ 
+ #include "nscd.h"
+ #include "dbg_log.h"
+-#ifdef HAVE_SENDFILE
+-# include <kernel-features.h>
+-#endif
+ 
+ /* This is the standard reply in case the service is disabled.  */
+ static const gr_response_header disabled =
+@@ -309,37 +306,9 @@ cache_addgr (struct database_dyn *db, int fd, request_header *req,
+ 	     unnecessarily let the receiver wait.  */
+ 	  assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1) && ! dataset_temporary)
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) &dataset->resp > (char *) db->data);
+-	      assert ((char *) dataset - (char *) db->head
+-		      + total
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-	      ssize_t written = sendfileall (fd, db->wr_fd,
+-					     (char *) &dataset->resp
+-					     - (char *) db->head,
+-					     dataset->head.recsize);
+-	      if (written != dataset->head.recsize)
+-		{
+-# ifndef __ASSUME_SENDFILE
+-		  if (written == -1 && errno == ENOSYS)
+-		    goto use_write;
+-# endif
+-		  all_written = false;
+-		}
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    if (writeall (fd, &dataset->resp, dataset->head.recsize)
+-		!= dataset->head.recsize)
+-	      all_written = false;
++	  if (writeall (fd, &dataset->resp, dataset->head.recsize)
++	      != dataset->head.recsize)
++	    all_written = false;
+ 	}
+ 
+       /* Add the record to the database.  But only if it has not been
+diff --git a/nscd/hstcache.c b/nscd/hstcache.c
+index 746e612552..40bcd92f92 100644
+--- a/nscd/hstcache.c
++++ b/nscd/hstcache.c
+@@ -37,9 +37,6 @@
+ 
+ #include "nscd.h"
+ #include "dbg_log.h"
+-#ifdef HAVE_SENDFILE
+-# include <kernel-features.h>
+-#endif
+ 
+ 
+ /* This is the standard reply in case the service is disabled.  */
+@@ -352,37 +349,9 @@ cache_addhst (struct database_dyn *db, int fd, request_header *req,
+ 	     unnecessarily keep the receiver waiting.  */
+ 	  assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1) && !alloca_used)
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) &dataset->resp > (char *) db->data);
+-	      assert ((char *) dataset - (char *) db->head
+-		      + total
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-	      ssize_t written = sendfileall (fd, db->wr_fd,
+-					     (char *) &dataset->resp
+-					     - (char *) db->head,
+-					     dataset->head.recsize);
+-	      if (written != dataset->head.recsize)
+-		{
+-# ifndef __ASSUME_SENDFILE
+-		  if (written == -1 && errno == ENOSYS)
+-		    goto use_write;
+-# endif
+-		  all_written = false;
+-		}
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    if (writeall (fd, &dataset->resp, dataset->head.recsize)
+-		!= dataset->head.recsize)
+-	      all_written = false;
++	  if (writeall (fd, &dataset->resp, dataset->head.recsize)
++	      != dataset->head.recsize)
++	    all_written = false;
+ 	}
+ 
+       /* Add the record to the database.  But only if it has not been
+diff --git a/nscd/initgrcache.c b/nscd/initgrcache.c
+index e389ed2e32..aa14e9236c 100644
+--- a/nscd/initgrcache.c
++++ b/nscd/initgrcache.c
+@@ -27,9 +27,6 @@
+ 
+ #include "dbg_log.h"
+ #include "nscd.h"
+-#ifdef HAVE_SENDFILE
+-# include <kernel-features.h>
+-#endif
+ 
+ #include "../nss/nsswitch.h"
+ 
+@@ -347,37 +344,9 @@ addinitgroupsX (struct database_dyn *db, int fd, request_header *req,
+ 	     unnecessarily let the receiver wait.  */
+ 	  assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1) && !alloca_used)
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) &dataset->resp > (char *) db->data);
+-	      assert ((char *) dataset - (char *) db->head
+-		      + total
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-	      ssize_t written = sendfileall (fd, db->wr_fd,
+-					     (char *) &dataset->resp
+-					     - (char *) db->head,
+-					     dataset->head.recsize);
+-	      if (written != dataset->head.recsize)
+-		{
+-# ifndef __ASSUME_SENDFILE
+-		  if (written == -1 && errno == ENOSYS)
+-		    goto use_write;
+-# endif
+-		  all_written = false;
+-		}
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    if (writeall (fd, &dataset->resp, dataset->head.recsize)
+-		!= dataset->head.recsize)
+-	      all_written = false;
++	  if (writeall (fd, &dataset->resp, dataset->head.recsize)
++	      != dataset->head.recsize)
++	    all_written = false;
+ 	}
+ 
+ 
+diff --git a/nscd/netgroupcache.c b/nscd/netgroupcache.c
+index 1c20444a13..3383cfb97e 100644
+--- a/nscd/netgroupcache.c
++++ b/nscd/netgroupcache.c
+@@ -413,33 +413,7 @@ addgetnetgrentX (struct database_dyn *db, int fd, request_header *req,
+ 	 since while inserting this thread might block and so would
+ 	 unnecessarily let the receiver wait.  */
+     writeout:
+-#ifdef HAVE_SENDFILE
+-      if (__builtin_expect (db->mmap_used, 1) && cacheable)
+-	{
+-	  assert (db->wr_fd != -1);
+-	  assert ((char *) &dataset->resp > (char *) db->data);
+-	  assert ((char *) dataset - (char *) db->head + total
+-		  <= (sizeof (struct database_pers_head)
+-		      + db->head->module * sizeof (ref_t)
+-		      + db->head->data_size));
+-# ifndef __ASSUME_SENDFILE
+-	  ssize_t written =
+-# endif
+-	    sendfileall (fd, db->wr_fd, (char *) &dataset->resp
+-			 - (char *) db->head, dataset->head.recsize);
+-# ifndef __ASSUME_SENDFILE
+-	  if (written == -1 && errno == ENOSYS)
+-	    goto use_write;
+-# endif
+-	}
+-      else
+-#endif
+-	{
+-#if defined HAVE_SENDFILE && !defined __ASSUME_SENDFILE
+-	use_write:
+-#endif
+-	  writeall (fd, &dataset->resp, dataset->head.recsize);
+-	}
++      writeall (fd, &dataset->resp, dataset->head.recsize);
+     }
+ 
+   if (cacheable)
+@@ -593,36 +567,9 @@ addinnetgrX (struct database_dyn *db, int fd, request_header *req,
+       /* We write the dataset before inserting it to the database
+ 	 since while inserting this thread might block and so would
+ 	 unnecessarily let the receiver wait.  */
+-       assert (fd != -1);
++      assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-      if (__builtin_expect (db->mmap_used, 1) && cacheable)
+-	{
+-	  assert (db->wr_fd != -1);
+-	  assert ((char *) &dataset->resp > (char *) db->data);
+-	  assert ((char *) dataset - (char *) db->head + sizeof (*dataset)
+-		  <= (sizeof (struct database_pers_head)
+-		      + db->head->module * sizeof (ref_t)
+-		      + db->head->data_size));
+-# ifndef __ASSUME_SENDFILE
+-	  ssize_t written =
+-# endif
+-	    sendfileall (fd, db->wr_fd,
+-			 (char *) &dataset->resp - (char *) db->head,
+-			 sizeof (innetgroup_response_header));
+-# ifndef __ASSUME_SENDFILE
+-	  if (written == -1 && errno == ENOSYS)
+-	    goto use_write;
+-# endif
+-	}
+-      else
+-#endif
+-	{
+-#if defined HAVE_SENDFILE && !defined __ASSUME_SENDFILE
+-	use_write:
+-#endif
+-	  writeall (fd, &dataset->resp, sizeof (innetgroup_response_header));
+-	}
++      writeall (fd, &dataset->resp, sizeof (innetgroup_response_header));
+     }
+ 
+   if (cacheable)
+diff --git a/nscd/nscd-client.h b/nscd/nscd-client.h
+index 610c88d037..72ea5408e4 100644
+--- a/nscd/nscd-client.h
++++ b/nscd/nscd-client.h
+@@ -441,8 +441,6 @@ extern ssize_t __readvall (int fd, const struct iovec *iov, int iovcnt)
+   attribute_hidden;
+ extern ssize_t writeall (int fd, const void *buf, size_t len)
+   attribute_hidden;
+-extern ssize_t sendfileall (int tofd, int fromfd, off_t off, size_t len)
+-  attribute_hidden;
+ 
+ /* Get netlink timestamp counter from mapped area or zero.  */
+ extern uint32_t __nscd_get_nl_timestamp (void);
+diff --git a/nscd/pwdcache.c b/nscd/pwdcache.c
+index 0cb485542e..e905af41bc 100644
+--- a/nscd/pwdcache.c
++++ b/nscd/pwdcache.c
+@@ -35,9 +35,6 @@
+ 
+ #include "nscd.h"
+ #include "dbg_log.h"
+-#ifdef HAVE_SENDFILE
+-# include <kernel-features.h>
+-#endif
+ 
+ /* This is the standard reply in case the service is disabled.  */
+ static const pw_response_header disabled =
+@@ -287,37 +284,9 @@ cache_addpw (struct database_dyn *db, int fd, request_header *req,
+ 	     unnecessarily let the receiver wait.  */
+ 	  assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1) && !alloca_used)
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) &dataset->resp > (char *) db->data);
+-	      assert ((char *) dataset - (char *) db->head
+-		      + total
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-	      ssize_t written = sendfileall (fd, db->wr_fd,
+-					     (char *) &dataset->resp
+-					     - (char *) db->head,
+-					     dataset->head.recsize);
+-	      if (written != dataset->head.recsize)
+-		{
+-# ifndef __ASSUME_SENDFILE
+-		  if (written == -1 && errno == ENOSYS)
+-		    goto use_write;
+-# endif
+-		  all_written = false;
+-		}
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    if (writeall (fd, &dataset->resp, dataset->head.recsize)
+-		!= dataset->head.recsize)
+-	      all_written = false;
++	  if (writeall (fd, &dataset->resp, dataset->head.recsize)
++	      != dataset->head.recsize)
++	    all_written = false;
+ 	}
+ 
+ 
+diff --git a/nscd/servicescache.c b/nscd/servicescache.c
+index e8a6462626..30755e99bf 100644
+--- a/nscd/servicescache.c
++++ b/nscd/servicescache.c
+@@ -278,37 +278,9 @@ cache_addserv (struct database_dyn *db, int fd, request_header *req,
+ 	     unnecessarily keep the receiver waiting.  */
+ 	  assert (fd != -1);
+ 
+-#ifdef HAVE_SENDFILE
+-	  if (__builtin_expect (db->mmap_used, 1) && !alloca_used)
+-	    {
+-	      assert (db->wr_fd != -1);
+-	      assert ((char *) &dataset->resp > (char *) db->data);
+-	      assert ((char *) dataset - (char *) db->head
+-		      + total
+-		      <= (sizeof (struct database_pers_head)
+-			  + db->head->module * sizeof (ref_t)
+-			  + db->head->data_size));
+-	      ssize_t written = sendfileall (fd, db->wr_fd,
+-					     (char *) &dataset->resp
+-					     - (char *) db->head,
+-					     dataset->head.recsize);
+-	      if (written != dataset->head.recsize)
+-		{
+-# ifndef __ASSUME_SENDFILE
+-		  if (written == -1 && errno == ENOSYS)
+-		    goto use_write;
+-# endif
+-		  all_written = false;
+-		}
+-	    }
+-	  else
+-# ifndef __ASSUME_SENDFILE
+-	  use_write:
+-# endif
+-#endif
+-	    if (writeall (fd, &dataset->resp, dataset->head.recsize)
+-		!= dataset->head.recsize)
+-	      all_written = false;
++	  if (writeall (fd, &dataset->resp, dataset->head.recsize)
++	      != dataset->head.recsize)
++	    all_written = false;
+ 	}
+ 
+       /* Add the record to the database.  But only if it has not been
+diff --git a/sysdeps/unix/sysv/linux/Makefile b/sysdeps/unix/sysv/linux/Makefile
+index 234d5a747a..fc259ad5ce 100644
+--- a/sysdeps/unix/sysv/linux/Makefile
++++ b/sysdeps/unix/sysv/linux/Makefile
+@@ -176,6 +176,6 @@ CFLAGS-mq_receive.c += -fexceptions
+ endif
+ 
+ ifeq ($(subdir),nscd)
+-sysdep-CFLAGS += -DHAVE_EPOLL -DHAVE_SENDFILE -DHAVE_INOTIFY -DHAVE_NETLINK
++sysdep-CFLAGS += -DHAVE_EPOLL -DHAVE_INOTIFY -DHAVE_NETLINK
+ CFLAGS-gai.c += -DNEED_NETLINK
+ endif
+diff --git a/sysdeps/unix/sysv/linux/kernel-features.h b/sysdeps/unix/sysv/linux/kernel-features.h
+index 555b82cf05..0eeebdcc23 100644
+--- a/sysdeps/unix/sysv/linux/kernel-features.h
++++ b/sysdeps/unix/sysv/linux/kernel-features.h
+@@ -37,9 +37,6 @@
+    introduced.  If somebody cares these values can afterwards be
+    corrected.  */
+ 
+-/* The sendfile syscall was introduced in 2.2.0.  */
+-#define __ASSUME_SENDFILE		1
+-
+ /* Some architectures use the socketcall multiplexer for some or all
+    socket-related operations, via a socket.S file in glibc, instead of
+    separate syscalls.  __ASSUME_SOCKETCALL is defined for such
+-- 
+2.30.2
+

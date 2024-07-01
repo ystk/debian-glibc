@@ -1,0 +1,52 @@
+From ee736d9b296d4a07ab2c63199886011b39902ac6 Mon Sep 17 00:00:00 2001
+From: DJ Delorie <dj@redhat.com>
+Date: Thu, 1 Mar 2018 23:20:45 -0500
+Subject: [BZ #22342] Fix netgroup cache keys.
+
+Unlike other nscd caches, the netgroup cache contains two types of
+records - those for "iterate through a netgroup" (i.e. setnetgrent())
+and those for "is this user in this netgroup" (i.e. innetgr()),
+i.e. full and partial records.  The timeout code assumes these records
+have the same key for the group name, so that the collection of records
+that is "this netgroup" can be expired as a unit.
+
+However, the keys are not the same, as the in-netgroup key is generated
+by nscd rather than being passed to it from elsewhere, and is generated
+without the trailing NUL.  All other keys have the trailing NUL, and as
+noted in the linked BZ, debug statements confirm that two keys for the
+same netgroup are added to the cache with two different lengths.
+
+The result of this is that as records in the cache expire, the purge
+code only cleans out one of the two types of entries, resulting in
+stale, possibly incorrect, and possibly inconsistent cache data.
+
+The patch simply includes the existing NUL in the computation for the
+key length ('key' points to the char after the NUL, and 'group' to the
+first char of the group, so 'key-group' includes the first char to the
+NUL, inclusive).
+
+	[BZ #22342]
+	* nscd/netgroupcache.c (addinnetgrX): Include trailing NUL in
+	key value.
+
+Reviewed-by: Carlos O'Donell <carlos@redhat.com>
+---
+ nscd/netgroupcache.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/nscd/netgroupcache.c b/nscd/netgroupcache.c
+index 23b46d9934..87c1e5029f 100644
+--- a/nscd/netgroupcache.c
++++ b/nscd/netgroupcache.c
+@@ -452,7 +452,7 @@ addinnetgrX (struct database_dyn *db, int fd, request_header *req,
+ {
+   const char *group = key;
+   key = (char *) rawmemchr (key, '\0') + 1;
+-  size_t group_len = key - group - 1;
++  size_t group_len = key - group;
+   const char *host = *key++ ? key : NULL;
+   if (host != NULL)
+     key = (char *) rawmemchr (key, '\0') + 1;
+-- 
+2.30.2
+

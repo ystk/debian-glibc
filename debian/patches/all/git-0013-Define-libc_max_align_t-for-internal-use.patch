@@ -1,0 +1,30 @@
+From 87d5275390f978e888cc2284023fd24b2586538d Mon Sep 17 00:00:00 2001
+From: Florian Weimer <fweimer@redhat.com>
+Date: Thu, 2 Apr 2015 10:07:04 +0200
+Subject: Define libc_max_align_t for internal use
+
+---
+ include/libc-internal.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/include/libc-internal.h b/include/libc-internal.h
+index 78f82da58a..4376476a57 100644
+--- a/include/libc-internal.h
++++ b/include/libc-internal.h
+@@ -70,4 +70,13 @@ extern void __init_misc (int, char **, char **);
+ #define PTR_ALIGN_UP(base, size) \
+   ((__typeof__ (base)) ALIGN_UP ((uintptr_t) (base), (size)))
+ 
++/* This mirrors the C11 max_align_t type provided by GCC, but it is
++   also available in C99 mode.  The aligned attributes are required
++   because some ABIs have reduced alignment requirements for struct
++   and union members.  */
++typedef struct {
++  long long ll __attribute__ ((__aligned__ (__alignof__ (long long))));
++  long double ld __attribute__ ((__aligned__ (__alignof__ (long double))));
++} libc_max_align_t;
++
+ #endif /* _LIBC_INTERNAL  */
+-- 
+2.30.2
+

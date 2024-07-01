@@ -1,0 +1,385 @@
+From feec23e8590f6405e287790cd600afa018a5d516 Mon Sep 17 00:00:00 2001
+From: Siddhesh Poyarekar <siddhesh@redhat.com>
+Date: Wed, 30 Apr 2014 11:57:09 +0530
+Subject: Consolidate code to initialize nscd dataset header
+
+This patch consolidates the code to initialize the header of a dataset
+into a single set of functions (one for positive and another for
+negative datasets) primarily to reduce repetition of code.  The
+secondary reason is to simplify Patch 2/2 which fixes the problem of
+an uninitialized byte in the header by initializing an unused field in
+the structure and hence preventing a possible data leak into the cache
+file.
+---
+ nscd/aicache.c       | 27 ++++++++-------------------
+ nscd/grpcache.c      | 24 ++++++++----------------
+ nscd/hstcache.c      | 27 +++++++++------------------
+ nscd/initgrcache.c   | 24 ++++++++----------------
+ nscd/netgroupcache.c | 33 ++++++++++++---------------------
+ nscd/nscd-client.h   | 30 ++++++++++++++++++++++++++++++
+ nscd/pwdcache.c      | 24 ++++++++----------------
+ nscd/servicescache.c | 24 ++++++++----------------
+ 8 files changed, 91 insertions(+), 122 deletions(-)
+
+diff --git a/nscd/aicache.c b/nscd/aicache.c
+index d6b928cf2d..b3c0b66e3a 100644
+--- a/nscd/aicache.c
++++ b/nscd/aicache.c
+@@ -383,17 +383,12 @@ addhstaiX (struct database_dyn *db, int fd, request_header *req,
+ 	  cp = family;
+ 	}
+ 
+-      /* Fill in the rest of the dataset.  */
+-      dataset->head.allocsize = total + req->key_len;
+-      dataset->head.recsize = total - offsetof (struct dataset, resp);
+-      dataset->head.notfound = false;
+-      dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      dataset->head.ttl = ttl == INT32_MAX ? db->postimeout : ttl;
+-      timeout = dataset->head.timeout = time (NULL) + dataset->head.ttl;
++      timeout = datahead_init_pos (&dataset->head, total + req->key_len,
++				   total - offsetof (struct dataset, resp),
++				   he == NULL ? 0 : dh->nreloads + 1,
++				   ttl == INT32_MAX ? db->postimeout : ttl);
+ 
++      /* Fill in the rest of the dataset.  */
+       dataset->resp.version = NSCD_VERSION;
+       dataset->resp.found = 1;
+       dataset->resp.naddrs = naddrs;
+@@ -528,15 +523,9 @@ next_nip:
+       else if ((dataset = mempool_alloc (db, (sizeof (struct dataset)
+ 					      + req->key_len), 1)) != NULL)
+ 	{
+-	  dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-	  dataset->head.recsize = total;
+-	  dataset->head.notfound = true;
+-	  dataset->head.nreloads = 0;
+-	  dataset->head.usable = true;
+-
+-	  /* Compute the timeout time.  */
+-	  timeout = dataset->head.timeout = time (NULL) + db->negtimeout;
+-	  dataset->head.ttl = db->negtimeout;
++	  timeout = datahead_init_neg (&dataset->head,
++				       sizeof (struct dataset) + req->key_len,
++				       total, db->negtimeout);
+ 
+ 	  /* This is the reply.  */
+ 	  memcpy (&dataset->resp, &notfound, total);
+diff --git a/nscd/grpcache.c b/nscd/grpcache.c
+index 8f5d39b138..5d4745c3cb 100644
+--- a/nscd/grpcache.c
++++ b/nscd/grpcache.c
+@@ -128,14 +128,10 @@ cache_addgr (struct database_dyn *db, int fd, request_header *req,
+ 	    }
+ 	  else if ((dataset = mempool_alloc (db, sizeof (struct dataset) + req->key_len, 1)) != NULL)
+ 	    {
+-	      dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-	      dataset->head.recsize = total;
+-	      dataset->head.notfound = true;
+-	      dataset->head.nreloads = 0;
+-	      dataset->head.usable = true;
+-
+-	      /* Compute the timeout time.  */
+-	      timeout = dataset->head.timeout = t + db->negtimeout;
++	      timeout = datahead_init_neg (&dataset->head,
++					   (sizeof (struct dataset)
++					    + req->key_len), total,
++					   db->negtimeout);
+ 
+ 	      /* This is the reply.  */
+ 	      memcpy (&dataset->resp, &notfound, total);
+@@ -232,14 +228,10 @@ cache_addgr (struct database_dyn *db, int fd, request_header *req,
+ 	  dataset_temporary = true;
+ 	}
+ 
+-      dataset->head.allocsize = total + n;
+-      dataset->head.recsize = total - offsetof (struct dataset, resp);
+-      dataset->head.notfound = false;
+-      dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      timeout = dataset->head.timeout = t + db->postimeout;
++      timeout = datahead_init_pos (&dataset->head, total + n,
++				   total - offsetof (struct dataset, resp),
++				   he == NULL ? 0 : dh->nreloads + 1,
++				   db->postimeout);
+ 
+       dataset->resp.version = NSCD_VERSION;
+       dataset->resp.found = 1;
+diff --git a/nscd/hstcache.c b/nscd/hstcache.c
+index abedf9a63e..746e612552 100644
+--- a/nscd/hstcache.c
++++ b/nscd/hstcache.c
+@@ -152,15 +152,11 @@ cache_addhst (struct database_dyn *db, int fd, request_header *req,
+ 	  else if ((dataset = mempool_alloc (db, (sizeof (struct dataset)
+ 						  + req->key_len), 1)) != NULL)
+ 	    {
+-	      dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-	      dataset->head.recsize = total;
+-	      dataset->head.notfound = true;
+-	      dataset->head.nreloads = 0;
+-	      dataset->head.usable = true;
+-
+-	      /* Compute the timeout time.  */
+-	      dataset->head.ttl = ttl == INT32_MAX ? db->negtimeout : ttl;
+-	      timeout = dataset->head.timeout = t + dataset->head.ttl;
++	      timeout = datahead_init_neg (&dataset->head,
++					   (sizeof (struct dataset)
++					    + req->key_len), total,
++					   (ttl == INT32_MAX
++					    ? db->negtimeout : ttl));
+ 
+ 	      /* This is the reply.  */
+ 	      memcpy (&dataset->resp, resp, total);
+@@ -257,15 +253,10 @@ cache_addhst (struct database_dyn *db, int fd, request_header *req,
+ 	  alloca_used = true;
+ 	}
+ 
+-      dataset->head.allocsize = total + req->key_len;
+-      dataset->head.recsize = total - offsetof (struct dataset, resp);
+-      dataset->head.notfound = false;
+-      dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      dataset->head.ttl = ttl == INT32_MAX ? db->postimeout : ttl;
+-      timeout = dataset->head.timeout = t + dataset->head.ttl;
++      timeout = datahead_init_pos (&dataset->head, total + req->key_len,
++				   total - offsetof (struct dataset, resp),
++				   he == NULL ? 0 : dh->nreloads + 1,
++				   ttl == INT32_MAX ? db->postimeout : ttl);
+ 
+       dataset->resp.version = NSCD_VERSION;
+       dataset->resp.found = 1;
+diff --git a/nscd/initgrcache.c b/nscd/initgrcache.c
+index a727fa9c8b..e389ed2e32 100644
+--- a/nscd/initgrcache.c
++++ b/nscd/initgrcache.c
+@@ -213,14 +213,10 @@ addinitgroupsX (struct database_dyn *db, int fd, request_header *req,
+ 	  else if ((dataset = mempool_alloc (db, (sizeof (struct dataset)
+ 						  + req->key_len), 1)) != NULL)
+ 	    {
+-	      dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-	      dataset->head.recsize = total;
+-	      dataset->head.notfound = true;
+-	      dataset->head.nreloads = 0;
+-	      dataset->head.usable = true;
+-
+-	      /* Compute the timeout time.  */
+-	      timeout = dataset->head.timeout = time (NULL) + db->negtimeout;
++	      timeout = datahead_init_neg (&dataset->head,
++					   (sizeof (struct dataset)
++					    + req->key_len), total,
++					   db->negtimeout);
+ 
+ 	      /* This is the reply.  */
+ 	      memcpy (&dataset->resp, &notfound, total);
+@@ -276,14 +272,10 @@ addinitgroupsX (struct database_dyn *db, int fd, request_header *req,
+ 	  alloca_used = true;
+ 	}
+ 
+-      dataset->head.allocsize = total + req->key_len;
+-      dataset->head.recsize = total - offsetof (struct dataset, resp);
+-      dataset->head.notfound = false;
+-      dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      timeout = dataset->head.timeout = time (NULL) + db->postimeout;
++      timeout = datahead_init_pos (&dataset->head, total + req->key_len,
++				   total - offsetof (struct dataset, resp),
++				   he == NULL ? 0 : dh->nreloads + 1,
++				   db->postimeout);
+ 
+       dataset->resp.version = NSCD_VERSION;
+       dataset->resp.found = 1;
+diff --git a/nscd/netgroupcache.c b/nscd/netgroupcache.c
+index c61d10b170..dc41aa1ebb 100644
+--- a/nscd/netgroupcache.c
++++ b/nscd/netgroupcache.c
+@@ -90,15 +90,9 @@ do_notfound (struct database_dyn *db, int fd, request_header *req,
+   /* If we cannot permanently store the result, so be it.  */
+   if (dataset != NULL)
+     {
+-      dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-      dataset->head.recsize = total;
+-      dataset->head.notfound = true;
+-      dataset->head.nreloads = 0;
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      timeout = dataset->head.timeout = time (NULL) + db->negtimeout;
+-      dataset->head.ttl = db->negtimeout;
++      timeout = datahead_init_neg (&dataset->head,
++				   sizeof (struct dataset) + req->key_len,
++				   total, db->negtimeout);
+ 
+       /* This is the reply.  */
+       memcpy (&dataset->resp, &notfound, total);
+@@ -361,13 +355,10 @@ addgetnetgrentX (struct database_dyn *db, int fd, request_header *req,
+ 
+   /* Fill in the dataset.  */
+   dataset = (struct dataset *) buffer;
+-  dataset->head.allocsize = total + req->key_len;
+-  dataset->head.recsize = total - offsetof (struct dataset, resp);
+-  dataset->head.notfound = false;
+-  dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-  dataset->head.usable = true;
+-  dataset->head.ttl = db->postimeout;
+-  timeout = dataset->head.timeout = time (NULL) + dataset->head.ttl;
++  timeout = datahead_init_pos (&dataset->head, total + req->key_len,
++			       total - offsetof (struct dataset, resp),
++			       he == NULL ? 0 : dh->nreloads + 1,
++			       db->postimeout);
+ 
+   dataset->resp.version = NSCD_VERSION;
+   dataset->resp.found = 1;
+@@ -543,12 +534,12 @@ addinnetgrX (struct database_dyn *db, int fd, request_header *req,
+       dataset = &dataset_mem;
+     }
+ 
+-  dataset->head.allocsize = sizeof (*dataset) + req->key_len;
+-  dataset->head.recsize = sizeof (innetgroup_response_header);
++  datahead_init_pos (&dataset->head, sizeof (*dataset) + req->key_len,
++		     sizeof (innetgroup_response_header),
++		     he == NULL ? 0 : dh->nreloads + 1, result->head.ttl);
++  /* Set the notfound status and timeout based on the result from
++     getnetgrent.  */
+   dataset->head.notfound = result->head.notfound;
+-  dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-  dataset->head.usable = true;
+-  dataset->head.ttl = result->head.ttl;
+   dataset->head.timeout = timeout;
+ 
+   dataset->resp.version = NSCD_VERSION;
+diff --git a/nscd/nscd-client.h b/nscd/nscd-client.h
+index b5c9f871a7..28edae061a 100644
+--- a/nscd/nscd-client.h
++++ b/nscd/nscd-client.h
+@@ -236,6 +236,36 @@ struct datahead
+   } data[0];
+ };
+ 
++static inline time_t
++datahead_init_common (struct datahead *head, nscd_ssize_t allocsize,
++		      nscd_ssize_t recsize, uint32_t ttl)
++{
++  head->allocsize = allocsize;
++  head->recsize = recsize;
++  head->usable = true;
++
++  head->ttl = ttl;
++  /* Compute the timeout time.  */
++  return head->timeout = time (NULL) + ttl;
++}
++
++static inline time_t
++datahead_init_pos (struct datahead *head, nscd_ssize_t allocsize,
++		   nscd_ssize_t recsize, uint8_t nreloads, uint32_t ttl)
++{
++  head->notfound = false;
++  head->nreloads = nreloads;
++  return datahead_init_common (head, allocsize, recsize, ttl);
++}
++
++static inline time_t
++datahead_init_neg (struct datahead *head, nscd_ssize_t allocsize,
++		   nscd_ssize_t recsize, uint32_t ttl)
++{
++  head->notfound = true;
++  head->nreloads = 0;
++  return datahead_init_common (head, allocsize, recsize, ttl);
++}
+ 
+ /* Structure for one hash table entry.  */
+ struct hashentry
+diff --git a/nscd/pwdcache.c b/nscd/pwdcache.c
+index 5adb8ad8e3..0cb485542e 100644
+--- a/nscd/pwdcache.c
++++ b/nscd/pwdcache.c
+@@ -135,14 +135,10 @@ cache_addpw (struct database_dyn *db, int fd, request_header *req,
+ 	  else if ((dataset = mempool_alloc (db, (sizeof (struct dataset)
+ 						  + req->key_len), 1)) != NULL)
+ 	    {
+-	      dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-	      dataset->head.recsize = total;
+-	      dataset->head.notfound = true;
+-	      dataset->head.nreloads = 0;
+-	      dataset->head.usable = true;
+-
+-	      /* Compute the timeout time.  */
+-	      timeout = dataset->head.timeout = t + db->negtimeout;
++	      timeout = datahead_init_neg (&dataset->head,
++					   (sizeof (struct dataset)
++					    + req->key_len), total,
++					   db->negtimeout);
+ 
+ 	      /* This is the reply.  */
+ 	      memcpy (&dataset->resp, &notfound, total);
+@@ -215,14 +211,10 @@ cache_addpw (struct database_dyn *db, int fd, request_header *req,
+ 	  alloca_used = true;
+ 	}
+ 
+-      dataset->head.allocsize = total + n;
+-      dataset->head.recsize = total - offsetof (struct dataset, resp);
+-      dataset->head.notfound = false;
+-      dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      timeout = dataset->head.timeout = t + db->postimeout;
++      timeout = datahead_init_pos (&dataset->head, total + n,
++				   total - offsetof (struct dataset, resp),
++				   he == NULL ? 0 : dh->nreloads + 1,
++				   db->postimeout);
+ 
+       dataset->resp.version = NSCD_VERSION;
+       dataset->resp.found = 1;
+diff --git a/nscd/servicescache.c b/nscd/servicescache.c
+index 52058a6e02..e8a6462626 100644
+--- a/nscd/servicescache.c
++++ b/nscd/servicescache.c
+@@ -120,14 +120,10 @@ cache_addserv (struct database_dyn *db, int fd, request_header *req,
+ 	  else if ((dataset = mempool_alloc (db, (sizeof (struct dataset)
+ 						  + req->key_len), 1)) != NULL)
+ 	    {
+-	      dataset->head.allocsize = sizeof (struct dataset) + req->key_len;
+-	      dataset->head.recsize = total;
+-	      dataset->head.notfound = true;
+-	      dataset->head.nreloads = 0;
+-	      dataset->head.usable = true;
+-
+-	      /* Compute the timeout time.  */
+-	      timeout = dataset->head.timeout = t + db->negtimeout;
++	      timeout = datahead_init_neg (&dataset->head,
++					   (sizeof (struct dataset)
++					    + req->key_len), total,
++					   db->negtimeout);
+ 
+ 	      /* This is the reply.  */
+ 	      memcpy (&dataset->resp, &notfound, total);
+@@ -207,14 +203,10 @@ cache_addserv (struct database_dyn *db, int fd, request_header *req,
+ 	  alloca_used = true;
+ 	}
+ 
+-      dataset->head.allocsize = total + req->key_len;
+-      dataset->head.recsize = total - offsetof (struct dataset, resp);
+-      dataset->head.notfound = false;
+-      dataset->head.nreloads = he == NULL ? 0 : (dh->nreloads + 1);
+-      dataset->head.usable = true;
+-
+-      /* Compute the timeout time.  */
+-      timeout = dataset->head.timeout = t + db->postimeout;
++      timeout = datahead_init_pos (&dataset->head, total + req->key_len,
++				   total - offsetof (struct dataset, resp),
++				   he == NULL ? 0 : dh->nreloads + 1,
++				   db->postimeout);
+ 
+       dataset->resp.version = NSCD_VERSION;
+       dataset->resp.found = 1;
+-- 
+2.30.2
+

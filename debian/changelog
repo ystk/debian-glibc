@@ -1,3 +1,13 @@
+glibc (2.19-18+deb8u14) jessie-security; urgency=medium
+
+  * Non-maintainer upload by the ELTS Team.
+  * CVE-2024-33599: nscd: Stack-based buffer overflow in netgroup cache
+  * CVE-2024-33600: nscd: Null pointer crashes after notfound response
+  * CVE-2024-33601: nscd: Daemon may terminate on memory allocation failure
+  * CVE-2024-33602: nscd: Possible memory corruption
+
+ -- Adrian Bunk <bunk@debian.org>  Sun, 30 Jun 2024 13:11:08 +0300
+
 glibc (2.19-18+deb8u13) jessie-security; urgency=medium
 
   * Non-maintainer upload by the ELTS Team.
