@@ -324,3 +324,6 @@ all/git-0011-nscd-Fix-double-free-in-netgroupcache-BZ-27462.patch
 all/git-0012-Add-struct-scratch_buffer-and-its-internal-helper-fu.patch
 all/git-0013-Define-libc_max_align_t-for-internal-use.patch
 all/git-0014-CVE-2024-33601-CVE-2024-33602-nscd-netgroup-Use-two-.patch
+
+any/local-CVE-2025-0395-1.diff
+any/local-CVE-2025-0395-2.diff
